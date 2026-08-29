@@ -1,0 +1,77 @@
+classDiagram
+    class HMMParams {
+        +startprob : vector K
+        +transmat : matrix KxK
+        +means : matrix KxD
+        +variances : matrix KxD
+        +copy() HMMParams
+    }
+
+    class HMMFitResult {
+        +log_likelihood : double
+        +n_iter : int
+        +converged : bool
+        +loglik_history : vector
+    }
+
+    class GaussianHMM {
+        +n_states : int
+        +tol = 1e-8
+        +max_iter = 500
+        +var_floor = 1e-8
+        +params : HMMParams
+        +pinned_init(X) HMMParams
+        +fit(X, init) HMMFitResult
+        +score(X) double
+        +filtered_probabilities(X) matrix
+        +smoothed_probabilities(X) matrix
+        +viterbi(X) states
+        +stationary_distribution() vector
+        +aic(X) double
+        +bic(X) double
+        -_forward(logb) alpha, d, m
+        -_backward(logb, d, m) beta
+    }
+
+    class strategies {
+        <<module>>
+        +momentum_positions(returns, lookback, vol_target, lambda, cap)
+        +ewma_variance(returns, lambda, init_window)
+        +carry_positions(rate_diffs, top_n, bottom_n, rebalance_days)
+        +carry_total_returns(spot, diffs)
+        +regime_gate(index_returns, ...) gate, models
+        +apply_gate(positions, gate)
+        +forward_step(params, alpha_prev, x_t)
+    }
+
+    class backtest {
+        <<module>>
+        +run_backtest(positions, returns, cost_bps, dates) BacktestResult
+        +compute_metrics(net, dates) map
+        +max_drawdown(equity) double
+        +state_conditional_returns(net, states, K) table
+    }
+
+    class BacktestResult {
+        +gross_returns : vector T
+        +net_returns : vector T
+        +turnover : vector T
+        +equity : vector T
+        +metrics : map
+    }
+
+    class pipeline {
+        <<module>>
+        +load_dataset(dir) Dataset
+        +run_full_pipeline(dir) results
+        +golden_cases(pipe) list
+    }
+
+    GaussianHMM --> HMMParams : owns fitted
+    GaussianHMM --> HMMFitResult : returns
+    strategies --> GaussianHMM : regime_gate refits
+    strategies --> HMMParams : forward_step
+    backtest --> BacktestResult : returns
+    pipeline --> GaussianHMM : full-sample fits
+    pipeline --> strategies : positions + gate
+    pipeline --> backtest : accounting

@@ -1,0 +1,177 @@
+{
+  "cases": [
+    {
+      "name": "hmm_k2_loglik",
+      "inputs": {},
+      "expect": {
+        "loglik": 6831.025531025771
+      },
+      "tol": 1e-06
+    },
+    {
+      "name": "hmm_k3_loglik",
+      "inputs": {},
+      "expect": {
+        "loglik": 6886.449836599692
+      },
+      "tol": 1e-06
+    },
+    {
+      "name": "hmm_k3_means",
+      "inputs": {},
+      "expect": {
+        "mean0": -0.0034319634930751195,
+        "mean1": 0.0006353583998346888,
+        "mean2": 0.0010403958021196894
+      },
+      "tol": 1e-05
+    },
+    {
+      "name": "hmm_k3_stds",
+      "inputs": {},
+      "expect": {
+        "std0": 0.0258043575504088,
+        "std1": 0.005791863046104987,
+        "std2": 0.010579865405951454
+      },
+      "tol": 1e-05
+    },
+    {
+      "name": "hmm_k3_transmat",
+      "inputs": {},
+      "expect": {
+        "a00": 0.9204443440618307,
+        "a01": 9.216620603929934e-10,
+        "a02": 0.07955565501650583,
+        "a10": 0.0008033898376732538,
+        "a11": 0.9915553035672332,
+        "a12": 0.007641306595090479,
+        "a20": 0.0148419641763885,
+        "a21": 0.021430507374208194,
+        "a22": 0.9637275284494023
+      },
+      "tol": 1e-05
+    },
+    {
+      "name": "hmm_k3_viterbi_counts",
+      "inputs": {},
+      "expect": {
+        "count0": 99.0,
+        "count1": 1372.0,
+        "count2": 529.0
+      },
+      "tol": 0.0
+    },
+    {
+      "name": "hmm_k3_stationary",
+      "inputs": {},
+      "expect": {
+        "pi0": 0.05658446857352928,
+        "pi1": 0.6767442888712507,
+        "pi2": 0.26667124255521996
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "hmm_k3_smoothed_t500",
+      "inputs": {},
+      "expect": {
+        "p0": 3.858084418915105e-06,
+        "p1": 0.9986575979626231,
+        "p2": 0.001338543952955811
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "hmm_k3_smoothed_t1500",
+      "inputs": {},
+      "expect": {
+        "p0": 3.1775235015307878e-06,
+        "p1": 0.9982319885629637,
+        "p2": 0.0017648339135385358
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "viterbi_accuracy_vs_true",
+      "inputs": {},
+      "expect": {
+        "accuracy": 0.9485
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "momentum_unfiltered",
+      "inputs": {},
+      "expect": {
+        "ann_return": 0.03377129540535992,
+        "sharpe": 0.8148843015940189,
+        "max_dd": -0.10483289797002227
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "momentum_filtered",
+      "inputs": {},
+      "expect": {
+        "ann_return": 0.03332748310802061,
+        "sharpe": 1.0402340431671147,
+        "max_dd": -0.07367427511512803
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "carry_unfiltered",
+      "inputs": {},
+      "expect": {
+        "ann_return": 0.10772684973128333,
+        "sharpe": 1.5787227345143786,
+        "max_dd": -0.10008377664063228
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "carry_filtered",
+      "inputs": {},
+      "expect": {
+        "ann_return": 0.06432646328820187,
+        "sharpe": 1.4927698149147917,
+        "max_dd": -0.04953170196634582
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "combined_sharpe",
+      "inputs": {},
+      "expect": {
+        "sharpe_unfiltered": 1.7995819889270461,
+        "sharpe_filtered": 1.8657119213238882
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "crisis_momentum_return",
+      "inputs": {},
+      "expect": {
+        "ann_return": -0.08770599850339575
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "turnover_momentum",
+      "inputs": {},
+      "expect": {
+        "mean_turnover": 0.030514605355425318
+      },
+      "tol": 1e-08
+    },
+    {
+      "name": "turnover_carry",
+      "inputs": {},
+      "expect": {
+        "mean_turnover": 0.0009999999999999998
+      },
+      "tol": 1e-08
+    }
+  ]
+}

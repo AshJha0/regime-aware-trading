@@ -1,0 +1,10 @@
+# Core (all that src/regime needs)
+numpy>=1.24
+pandas>=2.0
+
+# Test runner
+pytest>=7.0
+
+# Optional: cross-check of HMM log-likelihood scoring in tests
+# (test_hmm.py::test_hmmlearn_cross_check skips automatically if missing)
+hmmlearn>=0.3

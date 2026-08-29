@@ -1,0 +1,37 @@
+flowchart TD
+    subgraph DATA["data/ (seeded generator, RNG only here)"]
+        GEN[generate_data.py<br/>default_rng 83, true 3-state DGP]
+        IDX[market_index.csv]
+        TRD[trend_assets.csv]
+        FX[fx_carry.csv<br/>spot_ret + rate_diff]
+        TRU[true_states.csv<br/>teaching only]
+        CFG[config.json]
+        GEN --> IDX & TRD & FX & TRU & CFG
+    end
+
+    IDX --> HMMFULL["GaussianHMM full-sample fits<br/>K=2, K=3 (AIC/BIC, golden params)"]
+    HMMFULL --> VIT["Viterbi path (K=3)<br/>crisis attribution + accuracy vs true"]
+    TRU --> VIT
+    IDX --> GATE["regime_gate (walk-forward)<br/>expanding window, refit 63d,<br/>warm start, filtered P(calm)"]
+
+    TRD --> MOM["momentum_positions<br/>sign 252d cumret, EWMA vol target,<br/>4x cap"]
+    FX --> CAR["carry_positions<br/>rank diffs, top3/bottom3, 21d rebalance"]
+    FX --> CRET["carry_total_returns<br/>spot + diff(t-1)/252"]
+
+    GATE --> APG["apply_gate: P_filt = gate * P"]
+    MOM --> APG
+    CAR --> APG
+
+    MOM --> BT["run_backtest<br/>gross = P(t-1)*r(t), costs on turnover,<br/>equity, metrics"]
+    CAR --> BT
+    CRET --> BT
+    APG --> BT
+
+    BT --> COMB["combined portfolio<br/>0.5 momentum + 0.5 carry (net)"]
+    VIT --> CRISIS["state_conditional_returns<br/>crisis-period table"]
+    BT --> CRISIS
+    COMB --> CRISIS
+
+    BT --> OUT["demo report / golden.json<br/>18 cross-language cases"]
+    COMB --> OUT
+    CRISIS --> OUT

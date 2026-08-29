@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant Loop as walk-forward loop (t = 503..1999)
+    participant HMM as GaussianHMM
+    participant FS as forward_step
+    participant Gate as gate[t]
+
+    Note over Loop: before t0 = 503 the gate is 1 (no model yet)
+
+    Loop->>HMM: t = 503: fit(r[0..503]) from pinned quantile init
+    HMM-->>Loop: params (label-sorted), k* = argmin variance
+    Loop->>HMM: filtered_probabilities(r[0..503])
+    HMM-->>Loop: alpha[503] (full scaled forward pass)
+    Loop->>Gate: gate[503] = alpha[503][k*]
+
+    loop each day t between refits
+        Loop->>FS: forward_step(params, alpha[t-1], r[t])
+        FS-->>Loop: alpha[t] (one O(K^2) update, no lookback)
+        Loop->>Gate: gate[t] = alpha[t][k*] (or 1{p >= 0.5} in binary mode)
+    end
+
+    Loop->>HMM: t = 566, 629, ...: fit(r[0..t], init = previous params)
+    Note right of HMM: warm start keeps labels stable<br/>and EM iterations few
+    HMM-->>Loop: refreshed params, new k*, fresh full forward pass

@@ -1,0 +1,19 @@
+{
+  "n_states": 3,
+  "em_tol": 1e-08,
+  "em_max_iter": 500,
+  "var_floor": 1e-08,
+  "momentum_lookback": 252,
+  "vol_target": 0.1,
+  "ewma_lambda": 0.94,
+  "leverage_cap": 4.0,
+  "carry_top_n": 3,
+  "carry_bottom_n": 3,
+  "rebalance_days": 21,
+  "train_min_days": 504,
+  "refit_days": 63,
+  "gate_mode": "prob",
+  "gate_threshold": 0.5,
+  "cost_bps": 5.0,
+  "trading_days": 252
+}
