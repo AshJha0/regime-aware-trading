@@ -1,4 +1,4 @@
-# 11 — Regime-Aware Trading (Gaussian HMM, Momentum, FX Carry)
+# Regime-Aware Trading (Gaussian HMM, Momentum, FX Carry)
 
 A four-language reference implementation of a regime-aware trading study:
 a **diagonal-covariance Gaussian hidden Markov model** (scaled
