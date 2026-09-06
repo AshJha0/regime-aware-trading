@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build the regime library, demo and tests into out/ (no Maven; plain javac).
+# bash build.sh from java/. Requires Java 21, JUnit 4 and Hamcrest at the paths below.
 set -euo pipefail
 cd "$(dirname "$0")"
 

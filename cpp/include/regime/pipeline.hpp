@@ -11,13 +11,15 @@
 /// they can never drift apart.
 ///
 /// Label conventions (pinned): HMM states are sorted by mean ascending, so on
-/// this data state 0 = crisis (lowest mean, highest vol), state K-1 = bull.
-/// The bundled true states use the generator's ordering (0 = calm-bull,
-/// 1 = choppy, 2 = crisis); the pinned volatility mapping (calm -> argmin
-/// variance, crisis -> argmax variance) aligns them for the Viterbi-accuracy
-/// teaching number.
+/// this data state 0 = crisis (lowest mean, highest vol).  The bundled true
+/// states use the generator's ordering (0 = calm-bull, 1 = choppy,
+/// 2 = crisis); the pinned volatility mapping of the full-sample K=3 fit
+/// (calm -> argmin variance, crisis -> argmax variance) aligns them for the
+/// Viterbi-accuracy teaching number.  The crisis table always uses that K=3
+/// fit, whatever config n_states the walk-forward gate uses.
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -89,6 +91,12 @@ Dataset load_dataset(const std::string& data_dir);
 
 /// Run the entire study on the bundled data with the pinned config.
 PipelineResult run_full_pipeline(const std::string& data_dir);
+
+/// Run the study with optional overrides of the walk-forward cadence
+/// (tests may shorten the loop; golden values always use the bundled
+/// config).  std::nullopt keeps the config value.
+PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int> refit_days,
+                                 std::optional<int> train_min_days);
 
 }  // namespace regime
 

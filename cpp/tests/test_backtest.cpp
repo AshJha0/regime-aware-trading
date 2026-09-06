@@ -171,3 +171,98 @@ TEST(Backtest, PropertyCostsNeverHelp) {
         prev_total = total;
     }
 }
+
+// ------------------------------------------------------------------------- //
+// Robustness: wipe-outs, dates, degenerate shapes
+// ------------------------------------------------------------------------- //
+
+TEST(Backtest, WipeoutIsError) {
+    // PT-5: 4x leverage into a -30% day is a -120% net day -> error naming t.
+    const Matrix P = column({4.0, 4.0, 4.0});
+    const Matrix r = column({0.0, -0.3, 0.1});
+    try {
+        regime::run_backtest(P, r, 0.0);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("wiped out on day t=1"), std::string::npos);
+    }
+    EXPECT_THROW(regime::compute_metrics({0.01, -1.0, 0.02}), std::invalid_argument);
+    // exactly -100% net on day 0 via costs alone is a wipe-out too
+    EXPECT_THROW(regime::run_backtest(Matrix(1, 1, 1.0), Matrix(1, 1, 0.0), 1e4),
+                 std::invalid_argument);
+    // invariant on accepted input: max_dd >= -1 and equity > 0
+    const auto res = regime::run_backtest(P, column({0.0, -0.2, 0.1}));
+    EXPECT_GE(res.metrics.max_dd, -1.0);
+    for (double e : res.equity) EXPECT_GT(e, 0.0);
+    EXPECT_NEAR(res.equity[1], 0.2, 1e-15);
+}
+
+TEST(Backtest, RejectsReturnsBelowMinusOne) {
+    const Matrix P(3, 1, 1.0);
+    Matrix r = column({0.0, -1.0, 0.0});
+    EXPECT_THROW(regime::run_backtest(P, r), std::invalid_argument);
+    r(1, 0) = -1.5;
+    EXPECT_THROW(regime::run_backtest(P, r), std::invalid_argument);
+}
+
+TEST(Backtest, ComputeMetricsDatesLengthMismatch) {
+    // PT-7 / MAJ-5: the public metrics function validates dates itself.
+    const std::vector<std::string> three = {"2020-01-01", "2020-01-02", "2020-01-03"};
+    EXPECT_THROW(regime::compute_metrics(std::vector<double>(5, 0.0), &three), std::invalid_argument);
+    EXPECT_THROW(regime::run_backtest(Matrix(5, 1, 1.0), Matrix(5, 1, 0.0), 0.0, &three),
+                 std::invalid_argument);
+}
+
+TEST(Backtest, DatesMustBeStrictlyIncreasing) {
+    // PT-8 / MAJ-6: duplicated, out-of-order or malformed dates are rejected.
+    const Matrix P(3, 1, 1.0), r(3, 1, 0.0);
+    const std::vector<std::vector<std::string>> bad = {
+        {"2020-01-02", "2020-01-02", "2020-01-03"},
+        {"2020-02-03", "2020-01-02", "2020-01-03"},
+        {"2020-1-5", "2020-01-06", "2020-01-07"},   // not YYYY-MM-DD
+        {"2020-13-01", "2020-13-02", "2020-13-03"}, // month 13
+    };
+    for (const auto& dates : bad) {
+        EXPECT_THROW(regime::run_backtest(P, r, 0.0, &dates), std::invalid_argument);
+        EXPECT_THROW(regime::compute_metrics(std::vector<double>(3, 0.0), &dates),
+                     std::invalid_argument);
+    }
+    // sorted but non-contiguous months: pinned "contiguous runs" == calendar months
+    const std::vector<std::string> dates = {"2020-01-02", "2020-01-31", "2020-03-02"};
+    const std::vector<double> net = {-0.01, -0.02, 0.05};
+    const auto m = regime::compute_metrics(net, &dates);
+    EXPECT_NEAR(m.worst_month, 0.99 * 0.98 - 1.0, 1e-15);
+}
+
+TEST(Backtest, WorstMonthBlockFallback) {
+    // PT-11: without dates, consecutive 21-day blocks; trailing partial dropped.
+    std::vector<double> net(45, 0.0);
+    for (std::size_t t = 21; t < 42; ++t) net[t] = -0.01;
+    net[43] = -0.5;  // in the dropped tail; must not count
+    const auto m = regime::compute_metrics(net);
+    EXPECT_NEAR(m.worst_month, std::pow(0.99, 21) - 1.0, 1e-12);
+    EXPECT_NEAR(regime::compute_metrics(std::vector<double>(5, -0.01)).worst_month,
+                std::pow(0.99, 5) - 1.0, 1e-15);
+}
+
+TEST(Backtest, RejectsZeroAssets) {
+    // MAJ-7: A = 0 columns is an error in every language.
+    EXPECT_THROW(regime::run_backtest(Matrix(3, 0), Matrix(3, 0)), std::invalid_argument);
+}
+
+TEST(Backtest, MaxDrawdownRequiresPositiveEquity) {
+    EXPECT_THROW(regime::max_drawdown({1.0, 0.0, 0.5}), std::invalid_argument);
+    EXPECT_THROW(regime::max_drawdown({1.0, -0.2}), std::invalid_argument);
+    EXPECT_THROW(regime::max_drawdown({1.0, std::numeric_limits<double>::infinity()}),
+                 std::invalid_argument);
+}
+
+TEST(Backtest, StateConditionalReturnsValidation) {
+    // MIN-13: labels outside [0, K) and K < 1 are errors, never dropped.
+    const std::vector<double> net(4, 0.0);
+    EXPECT_THROW(regime::state_conditional_returns(net, {0, 1, 2, 3}, 3), std::invalid_argument);
+    EXPECT_THROW(regime::state_conditional_returns(net, {0, -1, 0, 0}, 3), std::invalid_argument);
+    EXPECT_THROW(regime::state_conditional_returns(net, {0, 0, 0, 0}, 0), std::invalid_argument);
+    EXPECT_THROW(regime::state_conditional_returns({0.0, std::nan(""), 0.0, 0.0}, {0, 0, 0, 0}, 1),
+                 std::invalid_argument);
+}

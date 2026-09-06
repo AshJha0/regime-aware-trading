@@ -213,3 +213,100 @@ fn apply_gate_scales_positions() {
     assert!(apply_gate(&pos, &gate[..3]).is_err());
     assert!(apply_gate(&pos, &[1.0, f64::NAN, 0.0, 0.0, 0.0]).is_err());
 }
+
+// ------------------------------------------------------------------------- //
+// Robustness: corrupt returns, re-ranking, gate edges
+// ------------------------------------------------------------------------- //
+
+#[test]
+fn momentum_rejects_returns_below_minus_one() {
+    // PT-4: a -100% (or worse) print is corrupt data, not a signal.
+    for bad in [-1.0, -1.5] {
+        let mut r = constant_matrix(300, &[0.001]);
+        r.set(10, 0, bad);
+        let err = momentum_positions(&r, 252, 0.10, 0.94, 4.0).unwrap_err();
+        assert!(err.to_string().contains("<= -100%"), "{err}");
+        assert!(ewma_variance(&r, 0.94, 252).is_err());
+        assert!(carry_total_returns(&r, &Matrix::zeros(300, 1)).is_err());
+    }
+    // -99.9% is legal (extreme, but a valid simple return).
+    let mut r = constant_matrix(300, &[0.001]);
+    r.set(10, 0, -0.999);
+    assert!(momentum_positions(&r, 252, 0.10, 0.94, 4.0).unwrap().all_finite());
+    // Rate differentials are not simple returns: -1.5 is accepted there.
+    let d = Matrix::filled(10, 4, -1.5);
+    assert_eq!(carry_positions(&d, 1, 1, 21).unwrap().rows(), 10);
+}
+
+#[test]
+fn carry_rerank_after_crossing() {
+    // PT-6: the book flips exactly at the first rebalance after the ranks
+    // cross, with turnover 4 (two full round-trips) on that day only.
+    let rows: Vec<Vec<f64>> = (0..45)
+        .map(|t| if t < 21 { vec![0.04, 0.03, 0.02, 0.01] } else { vec![0.01, 0.02, 0.03, 0.04] })
+        .collect();
+    let d = Matrix::from_rows(&rows).unwrap();
+    let pos = carry_positions(&d, 1, 1, 21).unwrap();
+    assert_eq!(pos.row(20), &[1.0, 0.0, 0.0, -1.0]);
+    for t in 21..42 {
+        assert_eq!(pos.row(t), &[-1.0, 0.0, 0.0, 1.0]);
+    }
+    for t in 1..45 {
+        let to: f64 = (0..4).map(|a| (pos.get(t, a) - pos.get(t - 1, a)).abs()).sum();
+        assert_eq!(to, if t == 21 { 4.0 } else { 0.0 }, "turnover at t={t}");
+    }
+    // Tie at the crossing day -> ascending asset index decides.
+    let tie_rows: Vec<Vec<f64>> = (0..45)
+        .map(|t| if t < 21 { vec![0.04, 0.03, 0.02, 0.01] } else { vec![0.02; 4] })
+        .collect();
+    let pos_tie = carry_positions(&Matrix::from_rows(&tie_rows).unwrap(), 1, 1, 21).unwrap();
+    assert_eq!(pos_tie.row(21), &[1.0, 0.0, 0.0, -1.0]);
+}
+
+#[test]
+fn binary_gate_threshold_edges() {
+    // PT-12: the '>=' convention at both ends of [0, 1]; outside is an error.
+    let r = index_returns();
+    let r = &r[..600];
+    let (prob, _) = regime_gate(r, 3, 400, 300, "prob", 0.5, 1e-8, 500, 1e-8).unwrap();
+    let (lo, _) = regime_gate(r, 3, 400, 300, "binary", 0.0, 1e-8, 500, 1e-8).unwrap();
+    assert!(lo[399..].iter().all(|&g| g == 1.0));
+    let (hi, _) = regime_gate(r, 3, 400, 300, "binary", 1.0, 1e-8, 500, 1e-8).unwrap();
+    for t in 399..600 {
+        assert_eq!(hi[t], if prob[t] == 1.0 { 1.0 } else { 0.0 });
+    }
+    for bad in [1.5, -0.1, f64::NAN] {
+        let err = regime_gate(r, 3, 400, 300, "binary", bad, 1e-8, 500, 1e-8).unwrap_err();
+        assert!(err.to_string().contains("threshold"), "{err}");
+    }
+}
+
+#[test]
+fn gate_edge_windows() {
+    // PT-13: degenerate but legal walk-forward geometries.
+    let r = index_returns();
+    let (gate, models) = regime_gate(&r[..400], 3, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8).unwrap();
+    assert_eq!(gate.len(), 400);
+    assert_eq!(models.len(), 1);
+    assert!(gate[..399].iter().all(|&g| g == 1.0));
+    assert!((0.0..=1.0).contains(&gate[399]));
+    let (gate2, models2) = regime_gate(&r[..500], 3, 400, 1000, "prob", 0.5, 1e-8, 500, 1e-8).unwrap();
+    assert_eq!(models2.len(), 1);
+    assert!(gate2.iter().all(|g| (0.0..=1.0).contains(g)));
+    let (gate3, models3) = regime_gate(&r[..4], 3, 4, 1, "prob", 0.5, 1e-8, 500, 1e-8).unwrap();
+    assert_eq!(models3.len(), 1);
+    assert!(gate3.iter().all(|g| g.is_finite()));
+}
+
+#[test]
+fn regime_gate_parameter_validation() {
+    // MIN-11: HMM settings are validated before any fit.
+    let r = index_returns();
+    let r = &r[..600];
+    let err = regime_gate(r, 1, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8).unwrap_err();
+    assert!(err.to_string().contains("n_states"), "{err}");
+    assert!(regime_gate(r, 3, 400, 63, "prob", 0.5, 0.0, 500, 1e-8).is_err());
+    let mut nan = r.to_vec();
+    nan.push(f64::NAN);
+    assert!(regime_gate(&nan, 3, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8).is_err());
+}

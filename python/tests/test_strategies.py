@@ -151,3 +151,134 @@ def test_apply_gate():
     assert np.allclose(out[:, 0], gate)
     with pytest.raises(ValueError):
         apply_gate(pos, gate[:3])
+
+
+# --------------------------------------------------------------------- #
+# Robustness: corrupt returns, re-ranking, gate edges
+# --------------------------------------------------------------------- #
+
+def test_momentum_rejects_returns_below_minus_one():
+    """PT-4: a -100% (or worse) print is corrupt data, not a signal."""
+    for bad in (-1.0, -1.5):
+        r = np.full((300, 1), 0.001)
+        r[10, 0] = bad
+        with pytest.raises(ValueError, match="<= -100%"):
+            momentum_positions(r, lookback=252)
+        with pytest.raises(ValueError, match="<= -100%"):
+            ewma_variance(r, 0.94, 252)
+        with pytest.raises(ValueError, match="<= -100%"):
+            carry_total_returns(r, np.zeros_like(r))
+    # -99.9% is legal (extreme, but a valid simple return)
+    r = np.full((300, 1), 0.001)
+    r[10, 0] = -0.999
+    assert np.all(np.isfinite(momentum_positions(r, lookback=252)))
+    # rate differentials are not simple returns: -1.5 is accepted there
+    d = np.full((10, 4), -1.5)
+    assert carry_positions(d, top_n=1, bottom_n=1).shape == (10, 4)
+
+
+def _rerank_panel() -> np.ndarray:
+    d = np.zeros((45, 4))
+    d[:21] = [0.04, 0.03, 0.02, 0.01]
+    d[21:] = [0.01, 0.02, 0.03, 0.04]
+    return d
+
+
+def test_carry_rerank_after_crossing():
+    """PT-6: the book flips exactly at the first rebalance after the ranks
+    cross, with turnover 4 (two full round-trips) on that day only."""
+    d = _rerank_panel()
+    pos = carry_positions(d, top_n=1, bottom_n=1, rebalance_days=21)
+    assert pos[20].tolist() == [1.0, 0.0, 0.0, -1.0]
+    for t in range(21, 42):
+        assert pos[t].tolist() == [-1.0, 0.0, 0.0, 1.0]
+    turnover = np.abs(np.diff(pos, axis=0)).sum(axis=1)  # turnover[t-1] is the day-t trade
+    assert turnover[20] == 4.0  # trade into P[21]
+    assert np.all(turnover[:20] == 0.0) and np.all(turnover[21:] == 0.0)
+    # tie at the crossing day -> ascending asset index decides
+    tie = d.copy()
+    tie[21:] = 0.02
+    pos_tie = carry_positions(tie, top_n=1, bottom_n=1, rebalance_days=21)
+    assert pos_tie[21].tolist() == [1.0, 0.0, 0.0, -1.0]
+    # golden-embedded panel helper reproduces the pinned re-ranking scalars
+    from regime import CARRY_RERANK_INPUTS, carry_rerank_panel, carry_rerank_values
+
+    panel = carry_rerank_panel(CARRY_RERANK_INPUTS)
+    assert panel.shape == (63, 4)
+    assert panel[9].tolist() == [0.04, 0.03, 0.02, 0.01]
+    assert panel[10].tolist() == [0.01, 0.02, 0.03, 0.04]
+    vals = carry_rerank_values(CARRY_RERANK_INPUTS)
+    assert vals["pos_day15_asset0"] == 1.0  # diffs changed at t=10 but no rebalance until 21
+    assert vals["pos_day21_asset0"] == -1.0 and vals["pos_day42_asset0"] == 1.0
+    assert vals["turnover_day21"] == 4.0 and vals["turnover_day42"] == 4.0
+    assert vals["mean_turnover"] == 10.0 / 63.0
+    # hand-derived: gross = 20 * 0.03/252 (10 good + 11 bad + 21 good accrual
+    # days), costs = 10 * 5e-4; ann_return = 252 * net_total / 63
+    assert vals["ann_return"] == pytest.approx(252.0 * (20 * 0.03 / 252.0 - 0.005) / 63.0, abs=1e-15)
+
+
+def test_binary_gate_threshold_edges(index_returns):
+    """PT-12: the '>=' convention at both ends of [0, 1]; outside is an error."""
+    r = index_returns[:600]
+    prob, _ = regime_gate(r, 3, 400, 300, mode="prob")
+    lo, _ = regime_gate(r, 3, 400, 300, mode="binary", threshold=0.0)
+    assert np.all(lo[399:] == 1.0)
+    hi, _ = regime_gate(r, 3, 400, 300, mode="binary", threshold=1.0)
+    assert np.array_equal(hi[399:], np.where(prob[399:] == 1.0, 1.0, 0.0))
+    for bad in (1.5, -0.1, np.nan):
+        with pytest.raises(ValueError, match="threshold"):
+            regime_gate(r, 3, 400, 300, mode="binary", threshold=bad)
+
+
+def test_gate_edge_windows(index_returns):
+    """PT-13: degenerate but legal walk-forward geometries."""
+    r = index_returns[:400]
+    gate, models = regime_gate(r, 3, train_min_days=400, refit_days=63)
+    assert gate.shape == (400,) and len(models) == 1
+    assert np.all(gate[:399] == 1.0) and 0.0 <= gate[399] <= 1.0
+    gate2, models2 = regime_gate(index_returns[:500], 3, train_min_days=400, refit_days=1000)
+    assert len(models2) == 1 and np.all((gate2 >= 0.0) & (gate2 <= 1.0))
+    gate3, models3 = regime_gate(index_returns[:4], 3, train_min_days=4, refit_days=1)
+    assert len(models3) == 1 and np.all(np.isfinite(gate3))
+
+
+def test_regime_gate_parameter_validation(index_returns):
+    """MAJ-7/MIN-11: schedule and HMM settings are validated before any fit."""
+    r = index_returns[:600]
+    with pytest.raises(ValueError, match="train_min_days"):
+        regime_gate(r, n_states=3, train_min_days=3)
+    with pytest.raises(ValueError, match="refit_days"):
+        regime_gate(r, train_min_days=400, refit_days=0)
+    with pytest.raises(ValueError, match="n_states"):
+        regime_gate(r, n_states=1, train_min_days=400)
+    with pytest.raises(ValueError):
+        regime_gate(r, train_min_days=400, tol=0.0)
+    with pytest.raises(ValueError):
+        regime_gate(np.column_stack([r, r]), train_min_days=400)  # not 1-D
+    with pytest.raises(ValueError, match="NaN"):
+        regime_gate(np.append(r, np.nan), train_min_days=400)
+
+
+def test_regime_gate_reports_refit_day_on_failure(index_returns, monkeypatch):
+    """Practitioner gap: a failing refit names the day index."""
+    from regime import GaussianHMM
+
+    r = index_returns[:600]
+    real_fit = GaussianHMM.fit
+
+    def boom(self, X, init=None):
+        if len(X) == 600:
+            raise ValueError("synthetic failure")
+        return real_fit(self, X, init)
+
+    monkeypatch.setattr(GaussianHMM, "fit", boom)
+    with pytest.raises(ValueError, match=r"refit at t=599: synthetic failure"):
+        regime_gate(r, train_min_days=400, refit_days=200)
+
+
+def test_apply_gate_rejects_nan_gate():
+    pos = np.ones((5, 2))
+    with pytest.raises(ValueError, match="NaN"):
+        apply_gate(pos, np.array([1.0, np.nan, 0.0, 0.0, 0.0]))
+    with pytest.raises(ValueError):
+        apply_gate(pos, np.ones((5, 1)))  # not 1-D

@@ -25,7 +25,7 @@ def main() -> int:
     print(LINE)
     pipe = run_full_pipeline(DATA_DIR)
     ds = pipe["dataset"]
-    K = pipe["config"]["n_states"]
+    K = pipe["hmm3"].n_states  # the K=3 tables are keyed to the full-sample K=3 fit
 
     # ---------------- model selection ---------------- #
     r = ds.index_returns

@@ -14,7 +14,7 @@ pieces are shaped the way they are.
 | Strategies | `strategies.py` | Position construction only — momentum (signal + EWMA vol targeting), carry (ranking + rebalance schedule + accrual), the walk-forward `regime_gate`, and `apply_gate`. Strategies never touch P&L. |
 | Backtest engine | `backtest.py` | The one place accounting exists: gross/net/turnover/equity recursions, summary metrics, drawdown, state-conditional attribution. Every strategy runs through the same engine. |
 | Pipeline | `pipeline.py` | Data loading, the end-to-end study (`run_full_pipeline`), and `golden_cases`. Demo, golden generator, and golden tests all call the same function, so they cannot drift apart. |
-| Data generator | `data/generate_data.py` | The only RNG in the project (seeded, `default_rng(83)`). Simulates the true 3-state DGP, writes CSVs byte-for-byte reproducibly, self-validates (enumerated forward check, EM monotonicity), then writes `golden.json`. |
+| Data generator | `data/generate_data.py` | The only RNG in library code (seeded, `default_rng(83)`; test fixtures draw their own seeded inputs). Simulates the true 3-state DGP, writes CSVs byte-for-byte reproducibly, self-validates (enumerated forward check, EM monotonicity), then writes `golden.json`. |
 
 The separation is deliberate: **signals decide, the engine accounts**.
 Strategy code emits a position matrix `P[t, a]` ("decided at the close of
@@ -59,7 +59,7 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>18 cross-language cases"]
+    BT --> OUT["demo report / golden.json<br/>20 cross-language cases, 77 scalars"]
     COMB --> OUT
     CRISIS --> OUT
 ```
@@ -91,6 +91,8 @@ classDiagram
         +n_iter : int
         +converged : bool
         +loglik_history : vector
+        +monotone : bool
+        +dead_state : int or None
     }
 
     class GaussianHMM {
@@ -101,6 +103,8 @@ classDiagram
         +params : HMMParams
         +pinned_init(X) HMMParams
         +fit(X, init) HMMFitResult
+        +validate_params(params, K, D)
+        +em_step_status(ll, ll_prev, tol) EMStep
         +score(X) double
         +filtered_probabilities(X) matrix
         +smoothed_probabilities(X) matrix
@@ -160,28 +164,29 @@ The walk-forward gate in detail — the one algorithmically subtle loop:
 
 ```mermaid
 sequenceDiagram
-    participant Loop as walk-forward loop (t = 503..1999)
+    participant WF as walk-forward loop (t = 503..1999)
     participant HMM as GaussianHMM
     participant FS as forward_step
     participant Gate as gate[t]
 
-    Note over Loop: before t0 = 503 the gate is 1 (no model yet)
+    Note over WF: settings validated up front (K >= 2, threshold in [0,1], schedule).<br/>Before t0 = 503 the gate is 1 (no model yet)
 
-    Loop->>HMM: t = 503: fit(r[0..503]) from pinned quantile init
-    HMM-->>Loop: params (label-sorted), k* = argmin variance
-    Loop->>HMM: filtered_probabilities(r[0..503])
-    HMM-->>Loop: alpha[503] (full scaled forward pass)
-    Loop->>Gate: gate[503] = alpha[503][k*]
+    WF->>HMM: t = 503: fit(r[0..503]) from pinned quantile init
+    HMM-->>WF: params (label-sorted) + fit_result (converged, dead_state, monotone), k* = argmin variance
+    WF->>HMM: filtered_probabilities(r[0..503])
+    HMM-->>WF: alpha[503] (full scaled forward pass, every d_t > 0 checked)
+    WF->>Gate: gate[503] = alpha[503][k*]
 
     loop each day t between refits
-        Loop->>FS: forward_step(params, alpha[t-1], r[t])
-        FS-->>Loop: alpha[t] (one O(K^2) update, no lookback)
-        Loop->>Gate: gate[t] = alpha[t][k*] (or 1{p >= 0.5} in binary mode)
+        WF->>FS: forward_step(params, alpha[t-1], r[t]) (lengths and alpha validated)
+        FS-->>WF: alpha[t] (one O(K^2) update, no lookback)
+        WF->>Gate: gate[t] = alpha[t][k*] (or 1{p >= threshold} in binary mode)
     end
 
-    Loop->>HMM: t = 566, 629, ...: fit(r[0..t], init = previous params)
-    Note right of HMM: warm start keeps labels stable<br/>and EM iterations few
-    HMM-->>Loop: refreshed params, new k*, fresh full forward pass
+    WF->>HMM: t = 566, 629, ...: fit(r[0..t], init = previous params) (init validated against K, D)
+    Note right of HMM: warm start keeps labels stable<br/>and EM iterations few.<br/>A dead state is flagged, never NaN
+    HMM-->>WF: refreshed params, new k*, fresh full forward pass
+    Note over WF: any refit error is re-raised with its day index (regime_gate refit at t=...)
 ```
 
 ## 4. Numerical design decisions and trade-offs
@@ -214,7 +219,33 @@ sequenceDiagram
   exhaustion the parameters have had one extra M-step, so one extra
   E-step re-scores them — again keeping report and parameters consistent.
   Non-convergence is a flag, not an exception: walk-forward loops must
-  survive a stubborn window.
+  survive a stubborn window. A *decrease* of the log-likelihood beyond
+  `1e-6 * max(1, |ll|)` is classified as `NON_MONOTONE` by the shared
+  `em_step_status` helper and reported as `converged = false,
+  monotone = false` — EM cannot decrease the likelihood, so this is a
+  numerical fault and must never be mistaken for convergence.
+* **Dead-state guard** (Rabiner 1989 §V.B, Bilmes 1998 §4): after every
+  E-step the transition-row support `sum_{t<T} gamma_t(i)` is checked
+  against `1e-12`. A state below it would make every M-step denominator
+  `0/0`; EM stops *before* the M-step with the just-scored finite
+  parameters, `converged = false` and `dead_state = i`. Detection was
+  chosen over re-seeding because it is deterministic, identical in four
+  languages, and honest: a re-seeded state changes the optimization path
+  silently, whereas a flag lets the walk-forward gate continue with a
+  finite model *and* lets the desk audit which refits degenerated. The
+  bundled pipeline never trips it (minimum support across all 518 EM
+  iterations of the full study is about 8.9 days of posterior mass).
+* **Validation at the boundary, arithmetic inside.** `validate_params`
+  runs on every inference call, warm start, `set_params` and
+  `forward_step`: shapes against `(K, D)`, finiteness, `variances > 0`,
+  row sums within `1e-9`. The forward pass additionally requires every
+  normalizer `d_t > 0` (a zero means the observation is impossible under
+  every reachable state, which is an error rather than a NaN). The
+  backtest requires returns `> -1`, `A >= 1`, strictly increasing dates
+  and refuses a wipe-out day (`net <= -1`) by name. This is what turns
+  the C++ unchecked `Matrix::operator()` and the Rust slice indexing from
+  a liability into a non-issue: no public path reaches them with a bad
+  shape.
 * **Warm-started refits.** Each refit initializes from the previous
   label-sorted fit. This cuts EM iterations dramatically (the expanding
   window changes little in 63 days) and keeps state identities stable
@@ -243,17 +274,19 @@ T <= K, series shorter than lookback, invalid config values are errors;
 EM non-convergence, floored variances, and tied ranks are ordinary
 results.
 
-| Language | Input errors | Non-convergence |
+| Language | Input errors | Non-convergence / dead state / non-monotone step |
 |---|---|---|
-| Python | `raise ValueError(message)` | `HMMFitResult.converged = False` |
-| C++ | `throw std::invalid_argument` (`std::domain_error` for numeric-domain violations) | `HMMFitResult::converged == false` |
-| Rust | `Err(RegimeError::...)` — a thiserror-style enum; no panics on bad input | `converged: false` in the fit result |
-| Java | `throw IllegalArgumentException(message)` | `HmmFitResult.converged() == false` |
+| Python | `raise ValueError(message)` — always; numpy shape errors never escape | `HMMFitResult.converged = False`, `dead_state`, `monotone` |
+| C++ | `throw std::invalid_argument` — always (no `std::domain_error`, no UB: every shape is checked before indexing) | `HMMFitResult::converged == false`, `dead_state` (-1 = none), `monotone` |
+| Rust | `Err(RegimeError::InvalidInput)` (`RegimeError::Data` for the loader); no panic on any library input — `Matrix::head` and `Matrix::try_get` are fallible, `Matrix::get` is only reached after shape validation | `converged: false`, `dead_state: Option<usize>`, `monotone` |
+| Java | `throw IllegalArgumentException(message)` — never an `ArrayIndexOutOfBoundsException` or `NullPointerException` from a public method | `HmmFitResult.converged() == false`, `deadState()` (-1 = none), `monotone()` |
 
 Validation happens at the public API boundary (`_as_2d`,
-`_validate_returns`, constructor checks), so internal loops can assume
-clean finite input and stay branch-free. Error messages carry the
-offending value (`"T=10 <= lookback=252"`) because these surface in
+`validate_params`, `_validate_returns`, `_coerce_dates`, constructor
+checks), so internal loops can assume clean finite input and stay
+branch-free. Error messages carry the offending value and, where it
+exists, the day index (`"T=10 <= lookback=252"`, `"equity wiped out on
+day t=1"`, `"regime_gate refit at t=566: ..."`) because these surface in
 walk-forward loops where context is otherwise lost.
 
 ## 6. Testing strategy
@@ -272,19 +305,50 @@ Four layers, mirrored in each language:
    grid-style property test that better-matched parameters score higher
    likelihoods; costs never help (property over a cost grid);
    the accounting identity; and the one-day-shift no-lookahead test.
-3. **Golden values.** All 18 cases in `data/golden/golden.json` — HMM
-   fit results at 1e-6/1e-5, probabilities at 1e-8, strategy metrics at
-   1e-8, Viterbi counts exact — plus the baked-in sign/semantic cases
-   (crisis momentum return < 0, filtered combined Sharpe > unfiltered,
-   filtered momentum maxDD shallower but return lower). Every language
-   parses the same flat JSON schema (C++ with a minimal hand-rolled
-   reader, Rust with serde_json, Java with a small bundled parser) and
-   must run the full pinned config for golden comparisons.
+3. **Golden values.** All 20 cases / 77 scalars in
+   `data/golden/golden.json` — HMM fit results at 1e-6/1e-5,
+   probabilities at 1e-8, all seven strategy metrics at 1e-8, Viterbi
+   counts exact, and the synthetic `carry_rerank_*` panel (positions
+   exact, backtest at 1e-8) that is the only golden protection for the
+   rebalance/ranking path — plus the baked-in sign/semantic cases (crisis
+   momentum return < 0, filtered combined Sharpe > unfiltered and maxDD
+   shallower, filtered momentum maxDD shallower but return lower, the
+   re-rank panel flips the book at day 21). Every language parses the
+   same flat JSON schema (C++ with a minimal hand-rolled reader, Rust
+   with serde_json, Java with a small bundled parser), rebuilds the
+   re-rank panel from the case's `inputs`, and must run the full pinned
+   config for golden comparisons; the assertion on the scalar count is
+   exact (77).
 4. **Edge cases.** K=1 rejected; variance floor engages when K exceeds
    distinct data support; short series rejected; carry tie-break by
    index; rebalance window longer than the sample keeps the day-0 book;
    zero-cost path gives `net == gross` exactly; non-convergence is a
    flag; determinism (two fits are bitwise identical in Python).
+5. **Robustness (mirrored in all four suites).** Dead state is flagged
+   with finite parameters and the score of exactly those parameters;
+   zero-likelihood observations are errors in `score` and
+   `forward_step`; D=2 data on a D=1 model and every malformed warm
+   start (wrong K, wrong D, negative variance, non-stochastic rows, NaN,
+   ragged storage) are invalid-argument errors; `forward_step` length
+   checks; the pinned initialization on `[1..5]` and on 30 zeros + 30
+   ones; Viterbi with a zero transition checked against enumeration; the
+   `em_step_status` classification table and (Python) an injected
+   decreasing scorer; `n_iter` equals the history length; the power
+   method errors on a cycling chain; returns `<= -1` rejected everywhere
+   while `-0.999` is accepted and rate differentials are unbounded; the
+   carry basket flips at the first rebalance after a rank crossing with
+   turnover exactly 4 and ties resolve by index; binary-gate thresholds
+   0 and 1 pin the `>=` convention and 1.5 / -0.1 / NaN are errors;
+   degenerate gate windows (`T == train_min_days`, `refit_days > T`,
+   4 points with K=3); gate settings validated before any fit and a
+   failing refit names its day; NaN gates rejected; wipe-out day named
+   and `max_dd >= -1` on accepted input; `compute_metrics` validates its
+   own dates; duplicated, unsorted and malformed dates rejected and
+   sorted non-contiguous months compound as calendar months; the 21-day
+   block fallback drops the trailing partial block; `A = 0` assets
+   rejected; non-positive equity rejected by `max_drawdown`; state labels
+   outside `[0, K)` and `K < 1` rejected; walk-forward overrides
+   (`refit_days`, `train_min_days`) run in every port.
 
 The Python suite additionally cross-checks the K=3 fit against
 `hmmlearn` when it is installed (skipped otherwise) — an independent
@@ -308,9 +372,56 @@ the golden file.
   (the recursions are inherently sequential); the `xi` accumulator is a
   single `(K, K)` matrix built as `A * (alpha[:-1].T @ w)` instead of a
   `(T, K, K)` tensor — this keeps memory at `O(T K)`.
-* Native ports should preallocate the `(T, K)` alpha/beta buffers and
-  reuse them across EM iterations; none of the hot loops allocates.
+* The native ports allocate the `(T, K)` `logb`/`gamma`/`beta` buffers
+  and the `(K, K)` `xi` accumulator once per EM iteration (a handful of
+  allocations per iteration, none inside the time loops). Preallocating
+  them across iterations is a possible optimization, not something the
+  code does today; at T = 2000, K = 3 the allocations are negligible next
+  to the `O(T K^2)` arithmetic.
 * Determinism beats micro-optimization in this codebase: keep summation
   order left-to-right over time inside a pass. Reordered reductions
   (e.g. pairwise/BLAS-tree sums over *time*) can drift past golden
   tolerances after 500 EM iterations.
+
+## 8. How a desk would use this
+
+The study is a *template* for a regime overlay, not a production
+system; here is where each piece plugs in and what has to be replaced.
+
+1. **Signal research.** Fit `GaussianHMM` on the desk's own risk proxy
+   (an index, a vol index, a funding spread) with `fit`, compare `K` with
+   `aic`/`bic`, and read `viterbi` / `smoothed_probabilities` for the
+   post-hoc regime map. Check `fit_result.converged`, `dead_state` and
+   `monotone` on every fit before trusting the parameters — a warm start
+   that killed a state is reported, not hidden.
+2. **Walk-forward validation.** `regime_gate` is the honest version of
+   the same thing: expanding-window refits, filtered probabilities only,
+   `models[i].fit_result` for a per-refit audit trail. Sweep
+   `train_min_days`, `refit_days` and `gate_mode` on *held-out* history;
+   the bundled `config.json` values are teaching defaults, and the
+   `run_full_pipeline(..., refit_days=, train_min_days=)` overrides exist
+   for exactly that sweep.
+3. **Position construction.** `momentum_positions` / `carry_positions`
+   emit `P[t]` in *notional per unit of capital*, decided at the close.
+   A desk replaces them with its own signal code and keeps the contract:
+   a `(T, A)` matrix, finite, decided from data through `t`. The
+   `_validate_returns` rule (simple returns `> -1`) is the minimum data
+   hygiene; production data still needs a missing-print policy, corporate
+   action adjustment and a calendar, none of which live here.
+4. **Accounting.** `run_backtest` is the single place that turns positions
+   into P&L, with `P[t-1] * r[t]` timing and linear costs on turnover.
+   Its refusals are the safety rails: a wipe-out day is an error naming
+   `t`, not a negative equity curve; dates must be strictly increasing so
+   `worst_month` means the same thing in every port. Replace the cost
+   model (impact, bid/ask, financing) before quoting numbers externally.
+5. **Cross-language deployment.** The reference is Python; the C++/Rust/
+   Java ports are for a latency-sensitive or JVM/Rust-hosted environment
+   and are held to the same 77 golden scalars, the same validation rules
+   and the same error family. A port that is modified locally should be
+   re-run against `data/golden/golden.json` and
+   `tools/check_cookbook.py` before use.
+6. **Reporting.** Quote full-sample metrics with the warm-up caveat
+   (251 flat momentum days, 503 gate = 1 days), say that Sharpe is raw,
+   and attach the crisis-attribution table — the sign of the crisis-state
+   return is the whole argument for the overlay.
+

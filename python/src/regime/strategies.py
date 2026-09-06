@@ -21,8 +21,13 @@ from .hmm import GaussianHMM, HMMParams, forward_step
 TRADING_DAYS = 252
 
 
-def _validate_returns(returns: np.ndarray, name: str = "returns") -> np.ndarray:
-    """Coerce to (T, A) float array; reject empty or non-finite input."""
+def _validate_returns(returns: np.ndarray, name: str = "returns", simple_returns: bool = False) -> np.ndarray:
+    """Coerce to (T, A) float array; reject empty or non-finite input.
+
+    With ``simple_returns=True`` (pinned, API_SPEC 3): every entry must be
+    ``> -1`` — a -100 % (or worse) day is corrupt data (a zero print, an
+    unadjusted split) and would make every trailing growth ratio ``0/0``.
+    """
     r = np.asarray(returns, dtype=float)
     if r.ndim == 1:
         r = r[:, None]
@@ -30,6 +35,9 @@ def _validate_returns(returns: np.ndarray, name: str = "returns") -> np.ndarray:
         raise ValueError(f"{name} must be a non-empty 1-D or 2-D array")
     if not np.all(np.isfinite(r)):
         raise ValueError(f"{name} contain NaN or inf")
+    if simple_returns and np.any(r <= -1.0):
+        t, a = np.argwhere(r <= -1.0)[0]
+        raise ValueError(f"{name} contain a return <= -100% at t={t}, asset={a} ({r[t, a]})")
     return r
 
 
@@ -52,7 +60,7 @@ def ewma_variance(returns: np.ndarray, lam: float, init_window: int) -> np.ndarr
     Returns:
         Array ``(T, A)`` of daily-frequency variances.
     """
-    r = _validate_returns(returns)
+    r = _validate_returns(returns, simple_returns=True)
     T, A = r.shape
     if not 0.0 < lam < 1.0:
         raise ValueError(f"ewma lambda must be in (0, 1), got {lam}")
@@ -93,10 +101,10 @@ def momentum_positions(
         Positions ``(T, A)``; ``P[t]`` is decided at close of day t.
 
     Raises:
-        ValueError: If the series is not longer than the lookback, or any
-            parameter is invalid.
+        ValueError: If the series is not longer than the lookback, any
+            parameter is invalid, or a return is ``<= -100%`` (pinned).
     """
-    r = _validate_returns(returns)
+    r = _validate_returns(returns, simple_returns=True)
     T, A = r.shape
     if lookback < 1:
         raise ValueError(f"lookback must be >= 1, got {lookback}")
@@ -187,7 +195,7 @@ def carry_total_returns(spot_returns: np.ndarray, rate_diffs: np.ndarray) -> np.
     Returns:
         Total returns, shape ``(T, A)``.
     """
-    s = _validate_returns(spot_returns, "spot returns")
+    s = _validate_returns(spot_returns, "spot returns", simple_returns=True)
     d = _validate_returns(rate_diffs, "rate differentials")
     if s.shape != d.shape:
         raise ValueError(f"spot returns {s.shape} and differentials {d.shape} must have equal shape")
@@ -244,8 +252,10 @@ def regime_gate(
         list of fitted models in refit order.
 
     Raises:
-        ValueError: If the series is shorter than ``train_min_days``, or
-            mode is unknown.
+        ValueError: If the series is shorter than ``train_min_days``, the
+            mode is unknown, ``threshold`` is outside ``[0, 1]``, the HMM
+            settings are invalid (``n_states < 2`` etc.), or a refit fails
+            (the message then names the refit day ``t``).
     """
     r = np.asarray(index_returns, dtype=float)
     if r.ndim != 1:
@@ -254,6 +264,10 @@ def regime_gate(
         raise ValueError("index_returns contain NaN or inf")
     if mode not in ("prob", "binary"):
         raise ValueError(f"gate mode must be 'prob' or 'binary', got {mode!r}")
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"gate threshold must be in [0, 1], got {threshold}")
+    # Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
+    GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor)
     T = r.shape[0]
     if train_min_days <= n_states or refit_days < 1:
         raise ValueError("train_min_days must exceed n_states and refit_days must be >= 1")
@@ -270,13 +284,19 @@ def regime_gate(
         if (t - t0) % refit_days == 0:
             model = GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor)
             warm = models[-1].params.copy() if models else None
-            model.fit(r[: t + 1], init=warm)
+            try:
+                model.fit(r[: t + 1], init=warm)
+                alpha = model.filtered_probabilities(r[: t + 1])[-1]
+            except ValueError as exc:
+                raise ValueError(f"regime_gate refit at t={t}: {exc}") from exc
             models.append(model)
             calm_state = int(np.argmin(model.params.variances[:, 0]))
-            alpha = model.filtered_probabilities(r[: t + 1])[-1]
         else:
             assert model is not None and model.params is not None and alpha is not None
-            alpha = forward_step(model.params, alpha, r[t])
+            try:
+                alpha = forward_step(model.params, alpha, r[t])
+            except ValueError as exc:
+                raise ValueError(f"regime_gate forward step at t={t}: {exc}") from exc
         p_calm = float(alpha[calm_state])
         gate[t] = p_calm if mode == "prob" else (1.0 if p_calm >= threshold else 0.0)
     return gate, models

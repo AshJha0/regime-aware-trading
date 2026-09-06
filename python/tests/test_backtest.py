@@ -114,3 +114,105 @@ def test_property_costs_never_help():
         res = run_backtest(P, r, cost_bps=bps)
         totals.append(res.net_returns.sum())
     assert all(a >= b - 1e-12 for a, b in zip(totals, totals[1:]))
+
+
+# --------------------------------------------------------------------- #
+# Robustness: wipe-outs, dates, degenerate shapes
+# --------------------------------------------------------------------- #
+
+def test_backtest_wipeout_is_error():
+    """PT-5: 4x leverage into a -30% day is a -120% net day -> error naming t."""
+    P = np.array([[4.0], [4.0], [4.0]])
+    r = np.array([[0.0], [-0.3], [0.1]])
+    with pytest.raises(ValueError, match="wiped out on day t=1"):
+        run_backtest(P, r, cost_bps=0.0)
+    with pytest.raises(ValueError, match="wiped out"):
+        compute_metrics(np.array([0.01, -1.0, 0.02]))
+    # exactly -100% net on day 0 via costs alone is a wipe-out too
+    with pytest.raises(ValueError, match="wiped out on day t=0"):
+        run_backtest(np.array([[1.0]]), np.array([[0.0]]), cost_bps=1e4)
+    # invariant on accepted input: max_dd >= -1 and equity > 0
+    P2 = np.array([[4.0], [4.0], [4.0]])
+    r2 = np.array([[0.0], [-0.2], [0.1]])
+    res = run_backtest(P2, r2)
+    assert res.metrics["max_dd"] >= -1.0 and np.all(res.equity > 0.0)
+    assert res.equity[1] == pytest.approx(0.2)
+
+
+def test_backtest_rejects_returns_below_minus_one():
+    P = np.ones((3, 1))
+    r = np.array([[0.0], [-1.0], [0.0]])
+    with pytest.raises(ValueError, match="<= -100%"):
+        run_backtest(P, r)
+    r[1, 0] = -1.5
+    with pytest.raises(ValueError, match="<= -100%"):
+        run_backtest(P, r)
+
+
+def test_compute_metrics_dates_length_mismatch():
+    """PT-7: the public metrics function validates dates itself."""
+    with pytest.raises(ValueError, match="dates length"):
+        compute_metrics(np.zeros(5), pd.bdate_range("2020-01-01", periods=3))
+    with pytest.raises(ValueError, match="dates length"):
+        run_backtest(np.ones((5, 1)), np.zeros((5, 1)), dates=pd.bdate_range("2020-01-01", periods=3))
+
+
+def test_dates_must_be_strictly_increasing():
+    """PT-8: duplicated or out-of-order dates are rejected everywhere."""
+    P, r = np.ones((3, 1)), np.zeros((3, 1))
+    for bad in (["2020-01-02", "2020-01-02", "2020-01-03"], ["2020-02-03", "2020-01-02", "2020-01-03"]):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            run_backtest(P, r, dates=pd.DatetimeIndex(bad))
+        with pytest.raises(ValueError, match="strictly increasing"):
+            compute_metrics(np.zeros(3), bad)
+    # sorted but non-contiguous months: pinned "contiguous runs" == calendar months
+    dates = pd.DatetimeIndex(["2020-01-02", "2020-03-02", "2020-01-31"]).sort_values()
+    net = np.array([-0.01, -0.02, 0.05])  # Jan: two days, Mar: one day
+    m = compute_metrics(net, dates)
+    assert m["worst_month"] == pytest.approx((1 - 0.01) * (1 - 0.02) - 1.0)
+    # MIN-12: plain ISO strings are accepted; garbage is a ValueError
+    m2 = compute_metrics(net, ["2020-01-02", "2020-01-31", "2020-03-02"])
+    assert m2["worst_month"] == m["worst_month"]
+    with pytest.raises(ValueError, match="parsed"):
+        compute_metrics(net, ["2020-01-02", "not-a-date", "2020-03-02"])
+
+
+def test_worst_month_block_fallback():
+    """PT-11: without dates, consecutive 21-day blocks; trailing partial dropped."""
+    net = np.zeros(45)
+    net[21:42] = -0.01
+    net[43] = -0.5  # in the dropped tail; must not count
+    m = compute_metrics(net)
+    assert m["worst_month"] == pytest.approx(0.99**21 - 1.0, abs=1e-12)
+    # fewer than 21 days: one block covering everything
+    assert compute_metrics(np.full(5, -0.01))["worst_month"] == pytest.approx(0.99**5 - 1.0)
+
+
+def test_backtest_rejects_zero_assets():
+    """MAJ-7: A = 0 columns is an error in every language (was silently zero)."""
+    with pytest.raises(ValueError, match="no assets"):
+        run_backtest(np.ones((3, 0)), np.ones((3, 0)))
+
+
+def test_max_drawdown_requires_positive_equity():
+    with pytest.raises(ValueError, match="positive"):
+        max_drawdown(np.array([1.0, 0.0, 0.5]))
+    with pytest.raises(ValueError, match="positive"):
+        max_drawdown(np.array([1.0, -0.2]))
+    with pytest.raises(ValueError):
+        max_drawdown(np.array([1.0, np.inf]))
+
+
+def test_state_conditional_returns_validation():
+    """MIN-13: labels outside [0, K) and K < 1 are errors, never dropped."""
+    net = np.zeros(4)
+    with pytest.raises(ValueError, match="state labels"):
+        state_conditional_returns(net, np.array([0, 1, 2, 3]), 3)
+    with pytest.raises(ValueError, match="state labels"):
+        state_conditional_returns(net, np.array([0, -1, 0, 0]), 3)
+    with pytest.raises(ValueError, match="n_states"):
+        state_conditional_returns(net, np.zeros(4, dtype=int), 0)
+    with pytest.raises(ValueError, match="NaN"):
+        state_conditional_returns(np.array([0.0, np.nan, 0.0, 0.0]), np.zeros(4, dtype=int), 1)
+    with pytest.raises(ValueError, match="state labels"):
+        state_conditional_returns(net, np.array([0.0, 1.0, 0.0, 0.0]), 2)  # float labels

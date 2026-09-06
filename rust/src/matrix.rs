@@ -67,7 +67,10 @@ impl Matrix {
         self.cols
     }
 
-    /// Element at `(r, c)` (debug-checked in debug builds only).
+    /// Element at `(r, c)`.  Panics on an out-of-range index like any slice
+    /// access; every public library entry point validates shapes first, so
+    /// this is only reachable through direct misuse of `Matrix` (use
+    /// [`Matrix::try_get`] for a checked read).
     #[inline]
     pub fn get(&self, r: usize, c: usize) -> f64 {
         self.data[r * self.cols + c]
@@ -102,7 +105,27 @@ impl Matrix {
     }
 
     /// Sub-matrix of the first `n` rows (used by expanding-window refits).
-    pub fn head(&self, n: usize) -> Matrix {
-        Matrix { rows: n, cols: self.cols, data: self.data[..n * self.cols].to_vec() }
+    ///
+    /// # Errors
+    /// `n > rows` (never a panic).
+    pub fn head(&self, n: usize) -> Result<Matrix> {
+        if n > self.rows {
+            return Err(RegimeError::InvalidInput(format!(
+                "head({n}) exceeds the matrix row count {}",
+                self.rows
+            )));
+        }
+        Ok(Matrix { rows: n, cols: self.cols, data: self.data[..n * self.cols].to_vec() })
+    }
+
+    /// Element at `(r, c)`, or an error when out of range (never a panic).
+    pub fn try_get(&self, r: usize, c: usize) -> Result<f64> {
+        if r >= self.rows || c >= self.cols {
+            return Err(RegimeError::InvalidInput(format!(
+                "index ({r}, {c}) out of range for a {}x{} matrix",
+                self.rows, self.cols
+            )));
+        }
+        Ok(self.data[r * self.cols + c])
     }
 }

@@ -53,32 +53,37 @@ struct StateStats {
 };
 
 /// Maximum drawdown of an equity curve, as a non-positive fraction.
-/// \throws std::invalid_argument on an empty curve.
+/// \throws std::invalid_argument on an empty, non-finite or non-positive curve.
 double max_drawdown(const std::vector<double>& equity);
 
 /// Pinned summary metrics from a daily net-return series.
-/// \param net   Daily net returns.
-/// \param dates Optional ISO dates (YYYY-MM-DD, length T) for the
-///              worst-calendar-month metric; when null, worst_month uses
-///              consecutive 21-day blocks instead.
-/// \throws std::invalid_argument on empty or non-finite input.
+/// \param net   Daily net returns (finite, each > -1).
+/// \param dates Optional ISO dates (YYYY-MM-DD, length T, strictly
+///              increasing) for the worst-calendar-month metric; when null,
+///              worst_month uses consecutive 21-day blocks instead (trailing
+///              partial block dropped — pinned, API_SPEC 2.1).
+/// \throws std::invalid_argument on empty/non-finite input, a net return
+///         <= -1 (wipe-out), or dates that are the wrong length, malformed
+///         or not strictly increasing.
 Metrics compute_metrics(const std::vector<double>& net,
                         const std::vector<std::string>* dates = nullptr);
 
 /// Run the pinned accounting on a position/return pair.
-/// \param positions P[t,a] decided at close of day t, shape (T x A).
-/// \param returns   Asset simple returns r[t,a], same shape.
+/// \param positions P[t,a] decided at close of day t, shape (T x A), A >= 1.
+/// \param returns   Asset simple returns r[t,a] (each > -1), same shape.
 /// \param cost_bps  One-way transaction cost in basis points of turnover.
-/// \param dates     Optional dates (length T) for calendar-month metrics.
-/// \throws std::invalid_argument on shape mismatch, non-finite input,
-///         negative cost, or dates length mismatch.
+/// \param dates     Optional dates (length T, strictly increasing).
+/// \throws std::invalid_argument on shape mismatch, empty input (no days or
+///         no assets), non-finite input, a return <= -1, negative cost,
+///         invalid dates, or a wipe-out (net[t] <= -1; the message names t).
 BacktestResult run_backtest(const Matrix& positions, const Matrix& returns,
                             double cost_bps = 0.0,
                             const std::vector<std::string>* dates = nullptr);
 
 /// Annualized performance of a return series conditioned on a state path:
 /// day-t net return is attributed to the day-t decoded state.
-/// \throws std::invalid_argument on length mismatch.
+/// \throws std::invalid_argument on length mismatch, non-finite net,
+///         n_states < 1, or a label outside [0, n_states).
 std::vector<StateStats> state_conditional_returns(const std::vector<double>& net,
                                                   const std::vector<int>& states,
                                                   int n_states);

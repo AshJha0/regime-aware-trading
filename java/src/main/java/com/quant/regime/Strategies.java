@@ -24,17 +24,31 @@ public final class Strategies {
     }
 
     private static double[][] validate(double[][] r, String name) {
-        if (r == null || r.length == 0 || r[0].length == 0) {
+        return validate(r, name, false);
+    }
+
+    /**
+     * Non-empty, rectangular, all finite. With {@code simpleReturns} (pinned,
+     * API_SPEC 3) every entry must also be &gt; -1: a -100 % (or worse) day
+     * is corrupt data and would make every trailing growth ratio 0/0.
+     */
+    private static double[][] validate(double[][] r, String name, boolean simpleReturns) {
+        if (r == null || r.length == 0 || r[0] == null || r[0].length == 0) {
             throw new IllegalArgumentException(name + " must be a non-empty 2-D array");
         }
         int a = r[0].length;
-        for (double[] row : r) {
-            if (row.length != a) {
+        for (int t = 0; t < r.length; t++) {
+            double[] row = r[t];
+            if (row == null || row.length != a) {
                 throw new IllegalArgumentException(name + " is ragged");
             }
-            for (double v : row) {
-                if (!Double.isFinite(v)) {
+            for (int j = 0; j < a; j++) {
+                if (!Double.isFinite(row[j])) {
                     throw new IllegalArgumentException(name + " contain NaN or inf");
+                }
+                if (simpleReturns && row[j] <= -1.0) {
+                    throw new IllegalArgumentException(name + " contain a return <= -100% at t=" + t
+                            + ", asset=" + j + " (" + row[j] + ")");
                 }
             }
         }
@@ -57,7 +71,7 @@ public final class Strategies {
      * @throws IllegalArgumentException on invalid inputs
      */
     public static double[][] ewmaVariance(double[][] returns, double lam, int initWindow) {
-        double[][] r = validate(returns, "returns");
+        double[][] r = validate(returns, "returns", true);
         int t2 = r.length;
         int a2 = r[0].length;
         if (!(lam > 0.0 && lam < 1.0)) {
@@ -105,7 +119,7 @@ public final class Strategies {
      */
     public static double[][] momentumPositions(double[][] returns, int lookback, double volTarget,
             double ewmaLambda, double leverageCap) {
-        double[][] r = validate(returns, "returns");
+        double[][] r = validate(returns, "returns", true);
         int t2 = r.length;
         int a2 = r[0].length;
         if (lookback < 1) {
@@ -218,7 +232,7 @@ public final class Strategies {
      * @throws IllegalArgumentException on shape mismatch or invalid input
      */
     public static double[][] carryTotalReturns(double[][] spotReturns, double[][] rateDiffs) {
-        double[][] s = validate(spotReturns, "spot returns");
+        double[][] s = validate(spotReturns, "spot returns", true);
         double[][] d = validate(rateDiffs, "rate differentials");
         if (s.length != d.length || s[0].length != d[0].length) {
             throw new IllegalArgumentException("spot returns and differentials must have equal shape");
@@ -275,7 +289,9 @@ public final class Strategies {
      * @param varFloor EM variance floor
      * @return gate values and the fitted models
      * @throws IllegalArgumentException if the series is shorter than
-     *     {@code trainMinDays}, or the mode is unknown
+     *     {@code trainMinDays}, the mode is unknown, {@code threshold} is
+     *     outside [0, 1], the HMM settings are invalid ({@code nStates < 2}
+     *     etc.), or a refit fails (the message then names the refit day t)
      */
     public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
             int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor) {
@@ -290,6 +306,11 @@ public final class Strategies {
         if (!"prob".equals(mode) && !"binary".equals(mode)) {
             throw new IllegalArgumentException("gate mode must be 'prob' or 'binary', got '" + mode + "'");
         }
+        if (!(threshold >= 0.0 && threshold <= 1.0)) {
+            throw new IllegalArgumentException("gate threshold must be in [0, 1], got " + threshold);
+        }
+        // Validates nStates >= 2, tol/varFloor > 0, maxIter >= 1 up front.
+        new GaussianHmm(nStates, tol, maxIter, varFloor);
         int t2 = indexReturns.length;
         if (trainMinDays <= nStates || refitDays < 1) {
             throw new IllegalArgumentException(
@@ -311,13 +332,22 @@ public final class Strategies {
                 model = new GaussianHmm(nStates, tol, maxIter, varFloor);
                 HmmParams warm = models.isEmpty() ? null : models.get(models.size() - 1).params().copy();
                 double[] window = Arrays.copyOfRange(indexReturns, 0, t + 1);
-                model.fit(window, warm);
+                try {
+                    model.fit(window, warm);
+                    double[][] filt = model.filteredProbabilities(window);
+                    alpha = filt[filt.length - 1];
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("regime_gate refit at t=" + t + ": " + e.getMessage(), e);
+                }
                 models.add(model);
                 calmState = argminVariance(model.params());
-                double[][] filt = model.filteredProbabilities(window);
-                alpha = filt[filt.length - 1];
             } else {
-                alpha = GaussianHmm.forwardStep(model.params(), alpha, new double[] {indexReturns[t]});
+                try {
+                    alpha = GaussianHmm.forwardStep(model.params(), alpha, new double[] {indexReturns[t]});
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException(
+                            "regime_gate forward step at t=" + t + ": " + e.getMessage(), e);
+                }
             }
             double pCalm = alpha[calmState];
             gate[t] = "prob".equals(mode) ? pCalm : (pCalm >= threshold ? 1.0 : 0.0);

@@ -12,6 +12,8 @@ classDiagram
         +n_iter : int
         +converged : bool
         +loglik_history : vector
+        +monotone : bool
+        +dead_state : int or None
     }
 
     class GaussianHMM {
@@ -22,6 +24,8 @@ classDiagram
         +params : HMMParams
         +pinned_init(X) HMMParams
         +fit(X, init) HMMFitResult
+        +validate_params(params, K, D)
+        +em_step_status(ll, ll_prev, tol) EMStep
         +score(X) double
         +filtered_probabilities(X) matrix
         +smoothed_probabilities(X) matrix

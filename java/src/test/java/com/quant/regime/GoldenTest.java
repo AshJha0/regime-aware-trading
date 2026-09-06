@@ -58,18 +58,81 @@ public class GoldenTest {
 
         for (String name : new String[] {"momentum_unfiltered", "momentum_filtered",
                 "carry_unfiltered", "carry_filtered"}) {
-            Backtest.Metrics m = pipe.results().get(name).metrics();
-            out.put(name, Map.of("ann_return", m.annReturn(), "sharpe", m.sharpe(), "max_dd", m.maxDd()));
+            out.put(name, metricEntries(pipe.results().get(name).metrics()));
         }
         out.put("combined_sharpe", Map.of(
                 "sharpe_unfiltered", pipe.combinedMetrics().get("unfiltered").sharpe(),
-                "sharpe_filtered", pipe.combinedMetrics().get("filtered").sharpe()));
+                "sharpe_filtered", pipe.combinedMetrics().get("filtered").sharpe(),
+                "max_dd_unfiltered", pipe.combinedMetrics().get("unfiltered").maxDd(),
+                "max_dd_filtered", pipe.combinedMetrics().get("filtered").maxDd()));
         out.put("crisis_momentum_return",
                 Map.of("ann_return", pipe.crisis().get("momentum_unfiltered")[0].annReturn()));
         out.put("turnover_momentum",
                 Map.of("mean_turnover", mean(pipe.results().get("momentum_unfiltered").turnover())));
         out.put("turnover_carry",
                 Map.of("mean_turnover", mean(pipe.results().get("carry_unfiltered").turnover())));
+        return out;
+    }
+
+    /** All seven pinned metrics of one strategy case, keyed as in golden.json. */
+    private static Map<String, Double> metricEntries(Backtest.Metrics m) {
+        Map<String, Double> out = new LinkedHashMap<>();
+        out.put("ann_return", m.annReturn());
+        out.put("ann_vol", m.annVol());
+        out.put("sharpe", m.sharpe());
+        out.put("max_dd", m.maxDd());
+        out.put("calmar", m.calmar());
+        out.put("hit_rate", m.hitRate());
+        out.put("worst_month", m.worstMonth());
+        return out;
+    }
+
+    /**
+     * Builds the pinned re-ranking differential panel from a case's inputs
+     * (API_SPEC 5): diff[t] = diffs[k] with k the last index whose
+     * switch_days[k] &lt;= t.
+     */
+    static double[][] carryRerankPanel(Map<?, ?> inputs) {
+        int t2 = ((Double) inputs.get("n_days")).intValue();
+        int a2 = ((Double) inputs.get("n_assets")).intValue();
+        List<?> switchDays = (List<?>) inputs.get("switch_days");
+        List<?> diffs = (List<?>) inputs.get("diffs");
+        assertEquals(switchDays.size(), diffs.size());
+        assertEquals(0.0, (Double) switchDays.get(0), 0.0);
+        double[][] panel = new double[t2][a2];
+        int k = 0;
+        for (int t = 0; t < t2; t++) {
+            while (k + 1 < switchDays.size() && ((Double) switchDays.get(k + 1)).intValue() <= t) {
+                k++;
+            }
+            List<?> row = (List<?>) diffs.get(k);
+            assertEquals(a2, row.size());
+            for (int a = 0; a < a2; a++) {
+                panel[t][a] = (Double) row.get(a);
+            }
+        }
+        return panel;
+    }
+
+    /** Every carry_rerank_* golden scalar computed by the Java port from inputs. */
+    private static Map<String, Double> carryRerankValues(Map<?, ?> inputs) {
+        double[][] diffs = carryRerankPanel(inputs);
+        double[][] pos = Strategies.carryPositions(diffs,
+                ((Double) inputs.get("top_n")).intValue(),
+                ((Double) inputs.get("bottom_n")).intValue(),
+                ((Double) inputs.get("rebalance_days")).intValue());
+        double[][] rets = Strategies.carryTotalReturns(new double[diffs.length][diffs[0].length], diffs);
+        Backtest.Result res = Backtest.run(pos, rets, (Double) inputs.get("cost_bps"), null);
+        Map<String, Double> out = new LinkedHashMap<>();
+        out.put("mean_turnover", mean(res.turnover()));
+        out.put("turnover_day21", res.turnover()[21]);
+        out.put("turnover_day42", res.turnover()[42]);
+        for (int[] ta : new int[][] {{15, 0}, {15, 3}, {21, 0}, {21, 3}, {42, 0}, {42, 3}}) {
+            out.put("pos_day" + ta[0] + "_asset" + ta[1], pos[ta[0]][ta[1]]);
+        }
+        out.put("ann_return", res.metrics().annReturn());
+        out.put("sharpe", res.metrics().sharpe());
+        out.put("max_dd", res.metrics().maxDd());
         return out;
     }
 
@@ -94,19 +157,40 @@ public class GoldenTest {
     @Test
     public void goldenFileHasExpectedCases() {
         List<?> cases = TestData.goldenCases();
-        assertEquals(18, cases.size());
+        assertEquals(20, cases.size());
         Set<String> names = new HashSet<>();
         for (Object c : cases) {
             names.add((String) ((Map<?, ?>) c).get("name"));
         }
-        assertEquals(18, names.size());
+        assertEquals(20, names.size());
         for (String required : new String[] {"hmm_k2_loglik", "hmm_k3_loglik", "hmm_k3_means",
                 "hmm_k3_stds", "hmm_k3_transmat", "hmm_k3_viterbi_counts", "hmm_k3_stationary",
                 "hmm_k3_smoothed_t500", "hmm_k3_smoothed_t1500", "viterbi_accuracy_vs_true",
                 "momentum_unfiltered", "momentum_filtered", "carry_unfiltered", "carry_filtered",
-                "combined_sharpe", "crisis_momentum_return", "turnover_momentum", "turnover_carry"}) {
+                "combined_sharpe", "crisis_momentum_return", "turnover_momentum", "turnover_carry",
+                "carry_rerank_positions", "carry_rerank_backtest"}) {
             assertTrue("missing golden case " + required, names.contains(required));
         }
+        for (String name : new String[] {"momentum_unfiltered", "momentum_filtered",
+                "carry_unfiltered", "carry_filtered"}) {
+            Map<?, ?> expect = (Map<?, ?>) caseByName(name).get("expect");
+            assertEquals(Set.of("ann_return", "ann_vol", "sharpe", "max_dd", "calmar", "hit_rate",
+                    "worst_month"), expect.keySet());
+        }
+        assertEquals(0.0, (Double) caseByName("carry_rerank_positions").get("tol"), 0.0);
+    }
+
+    @Test
+    public void carryRerankPanelReallyReranks() {
+        // The bundled differentials never cross; the embedded panel must.
+        Map<?, ?> rr = caseByName("carry_rerank_positions");
+        double[][] panel = carryRerankPanel((Map<?, ?>) rr.get("inputs"));
+        assertEquals(63, panel.length);
+        assertEquals(0.04, panel[9][0], 0.0);
+        assertEquals(0.01, panel[10][0], 0.0);
+        assertEquals(1.0, dbl("carry_rerank_positions", "pos_day15_asset0"), 0.0); // not yet rebalanced
+        assertEquals(-1.0, dbl("carry_rerank_positions", "pos_day21_asset0"), 0.0); // flipped at day 21
+        assertEquals(4.0, dbl("carry_rerank_positions", "turnover_day21"), 0.0);
     }
 
     @Test
@@ -119,7 +203,9 @@ public class GoldenTest {
             String name = (String) gcase.get("name");
             double tol = (Double) gcase.get("tol");
             Map<?, ?> expect = (Map<?, ?>) gcase.get("expect");
-            Map<String, Double> got = computed.get(name);
+            Map<String, Double> got = name.startsWith("carry_rerank")
+                    ? carryRerankValues((Map<?, ?>) gcase.get("inputs"))  // synthetic panel in inputs
+                    : computed.get(name);
             assertTrue("case not computed: " + name, got != null);
             for (Map.Entry<?, ?> e : expect.entrySet()) {
                 String key = (String) e.getKey();
@@ -134,7 +220,7 @@ public class GoldenTest {
                 checked++;
             }
         }
-        assertTrue("expected many scalar comparisons", checked >= 40);
+        assertEquals("every scalar across the 20 cases", 77, checked);
     }
 
     @Test
@@ -148,6 +234,8 @@ public class GoldenTest {
         assertTrue(dbl("momentum_filtered", "max_dd") > dbl("momentum_unfiltered", "max_dd"));
         // ...but costs total return (honest reporting)
         assertTrue(dbl("momentum_filtered", "ann_return") < dbl("momentum_unfiltered", "ann_return"));
+        // filtered combined drawdown is shallower too
+        assertTrue(dbl("combined_sharpe", "max_dd_filtered") > dbl("combined_sharpe", "max_dd_unfiltered"));
         // stationary distribution sums to one
         assertEquals(1.0,
                 dbl("hmm_k3_stationary", "pi0") + dbl("hmm_k3_stationary", "pi1")

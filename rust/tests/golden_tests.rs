@@ -7,7 +7,7 @@ use std::fs;
 
 use serde::Deserialize;
 
-use regime::{golden_values, run_full_pipeline};
+use regime::{carry_rerank_panel, carry_rerank_values, golden_values, run_full_pipeline, CarryRerankInputs};
 
 #[derive(Deserialize)]
 struct GoldenFile {
@@ -17,7 +17,6 @@ struct GoldenFile {
 #[derive(Deserialize)]
 struct GoldenCase {
     name: String,
-    #[allow(dead_code)]
     inputs: serde_json::Value,
     expect: BTreeMap<String, f64>,
     tol: f64,
@@ -28,7 +27,7 @@ fn load_golden() -> GoldenFile {
     serde_json::from_str(&text).expect("golden.json parses")
 }
 
-const REQUIRED: [&str; 18] = [
+const REQUIRED: [&str; 20] = [
     "hmm_k2_loglik",
     "hmm_k3_loglik",
     "hmm_k3_means",
@@ -47,16 +46,28 @@ const REQUIRED: [&str; 18] = [
     "crisis_momentum_return",
     "turnover_momentum",
     "turnover_carry",
+    "carry_rerank_positions",
+    "carry_rerank_backtest",
 ];
 
 #[test]
 fn golden_file_has_expected_cases() {
     let golden = load_golden();
     let names: Vec<&str> = golden.cases.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names.len(), 18);
+    assert_eq!(names.len(), 20);
     for required in REQUIRED {
         assert!(names.contains(&required), "missing golden case {required}");
     }
+    let by_name: BTreeMap<&str, &GoldenCase> =
+        golden.cases.iter().map(|c| (c.name.as_str(), c)).collect();
+    for name in ["momentum_unfiltered", "momentum_filtered", "carry_unfiltered", "carry_filtered"] {
+        let keys: Vec<&str> = by_name[name].expect.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["ann_return", "ann_vol", "calmar", "hit_rate", "max_dd", "sharpe", "worst_month"]
+        );
+    }
+    assert_eq!(by_name["carry_rerank_positions"].tol, 0.0);
 }
 
 #[test]
@@ -65,9 +76,15 @@ fn golden_values_reproduced() {
     // compare within each case's tolerance (tol = 0 means exact).
     let golden = load_golden();
     let pipe = run_full_pipeline("../data", None, None).expect("pipeline runs");
-    let computed = golden_values(&pipe);
+    let mut computed = golden_values(&pipe);
     let mut checked = 0usize;
     for case in &golden.cases {
+        if case.name.starts_with("carry_rerank") {
+            // Synthetic panel embedded in `inputs` (API_SPEC 5).
+            let inputs: CarryRerankInputs =
+                serde_json::from_value(case.inputs.clone()).expect("carry_rerank inputs parse");
+            computed.insert(case.name.clone(), carry_rerank_values(&inputs).expect("rerank case runs"));
+        }
         let got = computed
             .get(&case.name)
             .unwrap_or_else(|| panic!("case {} not computed", case.name));
@@ -88,7 +105,22 @@ fn golden_values_reproduced() {
             checked += 1;
         }
     }
-    assert!(checked >= 40, "only {checked} scalar comparisons ran");
+    assert_eq!(checked, 77, "every scalar across the 20 cases must be compared");
+}
+
+#[test]
+fn carry_rerank_panel_really_reranks() {
+    // The bundled differentials never cross; the embedded panel must.
+    let golden = load_golden();
+    let case = golden.cases.iter().find(|c| c.name == "carry_rerank_positions").unwrap();
+    let inputs: CarryRerankInputs = serde_json::from_value(case.inputs.clone()).unwrap();
+    let panel = carry_rerank_panel(&inputs).unwrap();
+    assert_eq!(panel.rows(), 63);
+    assert_eq!(panel.get(9, 0), 0.04);
+    assert_eq!(panel.get(10, 0), 0.01);
+    assert_eq!(case.expect["pos_day15_asset0"], 1.0); // not yet rebalanced
+    assert_eq!(case.expect["pos_day21_asset0"], -1.0); // flipped at day 21
+    assert_eq!(case.expect["turnover_day21"], 4.0);
 }
 
 #[test]
@@ -109,6 +141,8 @@ fn golden_sign_cases() {
         by_name["momentum_filtered"].expect["ann_return"]
             < by_name["momentum_unfiltered"].expect["ann_return"]
     );
+    // filtered combined drawdown is shallower too
+    assert!(cs["max_dd_filtered"] > cs["max_dd_unfiltered"]);
     // stationary distribution sums to one
     let pis = &by_name["hmm_k3_stationary"].expect;
     let total: f64 = pis.values().sum();

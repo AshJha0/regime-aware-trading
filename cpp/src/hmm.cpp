@@ -27,8 +27,17 @@ void validate_observations(const Matrix& X) {
     if (X.cols != 1 && X.cols != 2)
         throw std::invalid_argument("only univariate or 2-D observations supported, got D=" +
                                     std::to_string(X.cols));
+    if (X.data.size() != X.rows * X.cols)
+        throw std::invalid_argument("observation matrix storage does not match its shape");
     for (double v : X.data)
         if (!std::isfinite(v)) throw std::invalid_argument("observations contain NaN or inf");
+}
+
+[[noreturn]] void throw_zero_normalizer(std::size_t t) {
+    throw std::invalid_argument(
+        "forward normalizer is zero at t=" + std::to_string(t) +
+        ": the observation has zero likelihood under every reachable state "
+        "(parameters and data are incompatible)");
 }
 
 /// Linear-interpolation quantile (numpy default) of a sorted sample.
@@ -90,6 +99,7 @@ void forward_pass(const Matrix& logb, const HMMParams& p, Matrix& alpha,
                 dt += a;
             }
         }
+        if (!(dt > 0.0)) throw_zero_normalizer(t);
         d[t] = dt;
         for (std::size_t i = 0; i < K; ++i) alpha(t, i) /= dt;
     }
@@ -120,6 +130,61 @@ double loglik_from(const std::vector<double>& d, const std::vector<double>& m) {
 }
 
 }  // namespace
+
+EmStep em_step_status(double ll, double ll_prev, double tol) {
+    if (!std::isfinite(ll) || !std::isfinite(ll_prev)) return EmStep::NonMonotone;
+    const double delta = ll - ll_prev;
+    if (delta < -kMonotoneRelTol * std::max(1.0, std::abs(ll_prev))) return EmStep::NonMonotone;
+    if (delta < tol) return EmStep::Converged;
+    return EmStep::Continue;
+}
+
+void validate_params(const HMMParams& p, std::size_t n_states, std::size_t n_dims) {
+    const std::size_t K = n_states, D = n_dims;
+    if (p.startprob.size() != K)
+        throw std::invalid_argument("startprob length " + std::to_string(p.startprob.size()) +
+                                    " does not match n_states=" + std::to_string(K));
+    if (p.transmat.rows != K || p.transmat.cols != K || p.transmat.data.size() != K * K)
+        throw std::invalid_argument("transmat shape " + std::to_string(p.transmat.rows) + "x" +
+                                    std::to_string(p.transmat.cols) +
+                                    " does not match n_states=" + std::to_string(K));
+    if (p.means.rows != K || p.means.cols != D || p.means.data.size() != K * D)
+        throw std::invalid_argument("means shape " + std::to_string(p.means.rows) + "x" +
+                                    std::to_string(p.means.cols) + " does not match (n_states, D)=(" +
+                                    std::to_string(K) + ", " + std::to_string(D) + ")");
+    if (p.variances.rows != K || p.variances.cols != D || p.variances.data.size() != K * D)
+        throw std::invalid_argument("variances shape " + std::to_string(p.variances.rows) + "x" +
+                                    std::to_string(p.variances.cols) +
+                                    " does not match (n_states, D)=(" + std::to_string(K) + ", " +
+                                    std::to_string(D) + ")");
+    for (double v : p.startprob)
+        if (!std::isfinite(v)) throw std::invalid_argument("startprob contain NaN or inf");
+    for (double v : p.transmat.data)
+        if (!std::isfinite(v)) throw std::invalid_argument("transmat contain NaN or inf");
+    for (double v : p.means.data)
+        if (!std::isfinite(v)) throw std::invalid_argument("means contain NaN or inf");
+    for (double v : p.variances.data)
+        if (!std::isfinite(v)) throw std::invalid_argument("variances contain NaN or inf");
+    for (double v : p.variances.data)
+        if (!(v > 0.0)) throw std::invalid_argument("variances must be > 0");
+    double sp = 0.0;
+    for (double v : p.startprob) {
+        if (v < 0.0) throw std::invalid_argument("startprob must be non-negative and sum to 1");
+        sp += v;
+    }
+    if (std::abs(sp - 1.0) > kStochasticTol)
+        throw std::invalid_argument("startprob must be non-negative and sum to 1");
+    for (std::size_t i = 0; i < K; ++i) {
+        double row = 0.0;
+        for (std::size_t j = 0; j < K; ++j) {
+            if (p.transmat(i, j) < 0.0)
+                throw std::invalid_argument("transmat rows must be non-negative and sum to 1");
+            row += p.transmat(i, j);
+        }
+        if (std::abs(row - 1.0) > kStochasticTol)
+            throw std::invalid_argument("transmat rows must be non-negative and sum to 1");
+    }
+}
 
 GaussianHMM::GaussianHMM(int n_states, double tol, int max_iter, double var_floor)
     : n_states_(n_states), tol_(tol), max_iter_(max_iter), var_floor_(var_floor) {
@@ -172,13 +237,17 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
     if (T <= K)
         throw std::invalid_argument("need more observations than states: T=" +
                                     std::to_string(T) + ", K=" + std::to_string(n_states_));
+    if (init) validate_params(*init, K, D);
     HMMParams params = init ? *init : pinned_init(X);
 
     std::vector<double> history;
     double ll_prev = kNegInf;
     double ll = kNegInf;
     bool converged = false;
+    bool monotone = true;
+    int dead_state = -1;
     int n_iter = 0;
+    bool exhausted = true;
     Matrix alpha;
     std::vector<double> d, m;
 
@@ -188,11 +257,22 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
         Matrix logb = log_emissions(X, params);
         forward_pass(logb, params, alpha, d, m);
         ll = loglik_from(d, m);
+        if (!std::isfinite(ll))  // unreachable after the d_t > 0 guard; hard stop
+            throw std::invalid_argument("EM produced a non-finite log-likelihood");
         history.push_back(ll);
         ++n_iter;
-        if (n_iter > 1 && ll - ll_prev < tol_) {
-            converged = true;
-            break;
+        if (n_iter > 1) {
+            const EmStep status = em_step_status(ll, ll_prev, tol_);
+            if (status == EmStep::NonMonotone) {
+                monotone = false;
+                exhausted = false;
+                break;
+            }
+            if (status == EmStep::Converged) {
+                converged = true;
+                exhausted = false;
+                break;
+            }
         }
         ll_prev = ll;
         Matrix beta = backward_pass(logb, params, d, m);
@@ -201,6 +281,24 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
         Matrix gamma(T, K);
         for (std::size_t t = 0; t < T; ++t)
             for (std::size_t i = 0; i < K; ++i) gamma(t, i) = alpha(t, i) * beta(t, i);
+
+        // Dead-state guard (pinned): a state without posterior support
+        // cannot be re-estimated; stop with the just-scored parameters.
+        std::vector<double> gsum(K, 0.0), gsum_trans(K, 0.0);
+        for (std::size_t t = 0; t < T; ++t)
+            for (std::size_t i = 0; i < K; ++i) {
+                gsum[i] += gamma(t, i);
+                if (t + 1 < T) gsum_trans[i] += gamma(t, i);
+            }
+        for (std::size_t i = 0; i < K; ++i)
+            if (gsum_trans[i] < kDeadStateSupport) {
+                dead_state = static_cast<int>(i);
+                break;
+            }
+        if (dead_state >= 0) {
+            exhausted = false;
+            break;
+        }
 
         // xi summed over t: xi_sum(i,j) = A_ij * sum_t alpha_t(i) * w_t(j),
         // with w_t(j) = bt_{t+1}(j) * beta_{t+1}(j) / d_{t+1}.
@@ -216,12 +314,6 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
             for (std::size_t j = 0; j < K; ++j) xi_sum(i, j) *= params.transmat(i, j);
 
         // M-step.
-        std::vector<double> gsum(K, 0.0), gsum_trans(K, 0.0);
-        for (std::size_t t = 0; t < T; ++t)
-            for (std::size_t i = 0; i < K; ++i) {
-                gsum[i] += gamma(t, i);
-                if (t + 1 < T) gsum_trans[i] += gamma(t, i);
-            }
         for (std::size_t i = 0; i < K; ++i) params.startprob[i] = gamma(0, i);
         for (std::size_t i = 0; i < K; ++i)
             for (std::size_t j = 0; j < K; ++j) params.transmat(i, j) = xi_sum(i, j) / gsum_trans[i];
@@ -243,7 +335,7 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
             }
     }
 
-    if (!converged) {
+    if (exhausted) {
         // max_iter exhausted: params had one more M-step than the last
         // recorded E-step, so score them once for a consistent report.
         Matrix logb = log_emissions(X, params);
@@ -273,7 +365,7 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
     }
     params_ = std::move(sorted);
     fitted_ = true;
-    fit_result_ = HMMFitResult{ll, n_iter, converged, std::move(history)};
+    fit_result_ = HMMFitResult{ll, n_iter, converged, std::move(history), monotone, dead_state};
     return fit_result_;
 }
 
@@ -283,13 +375,23 @@ const HMMParams& GaussianHMM::params() const {
 }
 
 void GaussianHMM::set_params(const HMMParams& p) {
+    if (p.means.cols != 1 && p.means.cols != 2)
+        throw std::invalid_argument("only univariate or 2-D parameters supported, got D=" +
+                                    std::to_string(p.means.cols));
+    validate_params(p, static_cast<std::size_t>(n_states_), p.means.cols);
     params_ = p;
     fitted_ = true;
 }
 
-double GaussianHMM::score(const Matrix& X) const {
+const HMMParams& GaussianHMM::prepare(const Matrix& X) const {
     const HMMParams& p = params();
     validate_observations(X);
+    validate_params(p, static_cast<std::size_t>(n_states_), X.cols);
+    return p;
+}
+
+double GaussianHMM::score(const Matrix& X) const {
+    const HMMParams& p = prepare(X);
     Matrix logb = log_emissions(X, p);
     Matrix alpha;
     std::vector<double> d, m;
@@ -298,8 +400,7 @@ double GaussianHMM::score(const Matrix& X) const {
 }
 
 Matrix GaussianHMM::filtered_probabilities(const Matrix& X) const {
-    const HMMParams& p = params();
-    validate_observations(X);
+    const HMMParams& p = prepare(X);
     Matrix logb = log_emissions(X, p);
     Matrix alpha;
     std::vector<double> d, m;
@@ -308,8 +409,7 @@ Matrix GaussianHMM::filtered_probabilities(const Matrix& X) const {
 }
 
 Matrix GaussianHMM::smoothed_probabilities(const Matrix& X) const {
-    const HMMParams& p = params();
-    validate_observations(X);
+    const HMMParams& p = prepare(X);
     Matrix logb = log_emissions(X, p);
     Matrix alpha;
     std::vector<double> d, m;
@@ -322,8 +422,7 @@ Matrix GaussianHMM::smoothed_probabilities(const Matrix& X) const {
 }
 
 std::vector<int> GaussianHMM::viterbi(const Matrix& X) const {
-    const HMMParams& p = params();
-    validate_observations(X);
+    const HMMParams& p = prepare(X);
     Matrix logb = log_emissions(X, p);
     const std::size_t T = X.rows, K = logb.cols;
     Matrix logA(K, K);
@@ -363,6 +462,9 @@ std::vector<int> GaussianHMM::viterbi(const Matrix& X) const {
 std::vector<double> GaussianHMM::stationary_distribution(double tol, int max_iter) const {
     const HMMParams& p = params();
     const std::size_t K = static_cast<std::size_t>(n_states_);
+    validate_params(p, K, p.means.cols);
+    if (!(tol > 0.0) || max_iter < 1)
+        throw std::invalid_argument("stationary_distribution: tol must be > 0 and max_iter >= 1");
     std::vector<double> pi(K, 1.0 / static_cast<double>(K)), nxt(K);
     for (int it = 0; it < max_iter; ++it) {
         double total = 0.0;
@@ -380,7 +482,9 @@ std::vector<double> GaussianHMM::stationary_distribution(double tol, int max_ite
         if (diff < tol) return nxt;
         pi = nxt;
     }
-    return pi;
+    throw std::invalid_argument("stationary distribution did not converge in " +
+                                std::to_string(max_iter) +
+                                " power-method iterations (periodic or reducible transition matrix)");
 }
 
 int GaussianHMM::n_parameters(int n_dims) const {
@@ -400,7 +504,24 @@ double GaussianHMM::bic(const Matrix& X) const {
 std::vector<double> forward_step(const HMMParams& params,
                                  const std::vector<double>& alpha_prev,
                                  const std::vector<double>& x_t) {
-    const std::size_t K = params.means.rows, D = params.means.cols;
+    const std::size_t K = params.startprob.size(), D = params.means.cols;
+    validate_params(params, K, D);
+    if (alpha_prev.size() != K)
+        throw std::invalid_argument("alpha_prev length " + std::to_string(alpha_prev.size()) +
+                                    " does not match n_states=" + std::to_string(K));
+    double asum = 0.0;
+    for (double v : alpha_prev) {
+        if (!std::isfinite(v) || v < 0.0)
+            throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
+        asum += v;
+    }
+    if (std::abs(asum - 1.0) > kStochasticTol)
+        throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
+    if (x_t.size() != D)
+        throw std::invalid_argument("observation length " + std::to_string(x_t.size()) +
+                                    " does not match D=" + std::to_string(D));
+    for (double v : x_t)
+        if (!std::isfinite(v)) throw std::invalid_argument("observation contains NaN or inf");
     std::vector<double> logb(K);
     double mx = kNegInf;
     for (std::size_t i = 0; i < K; ++i) {
@@ -421,6 +542,9 @@ std::vector<double> forward_step(const HMMParams& params,
         a[j] = s * std::exp(logb[j] - mx);
         total += a[j];
     }
+    if (!(total > 0.0))
+        throw std::invalid_argument(
+            "forward step: the observation has zero likelihood under every reachable state");
     for (std::size_t j = 0; j < K; ++j) a[j] /= total;
     return a;
 }

@@ -25,10 +25,14 @@ pub use backtest::{
     Metrics, StateStats,
 };
 pub use error::{RegimeError, Result};
-pub use hmm::{forward_step, GaussianHmm, HmmFitResult, HmmParams};
+pub use hmm::{
+    em_step_status, forward_step, validate_params, EmStep, GaussianHmm, HmmFitResult, HmmParams,
+    DEAD_STATE_SUPPORT, MONOTONE_REL_TOL, STOCHASTIC_TOL,
+};
 pub use matrix::Matrix;
 pub use pipeline::{
-    golden_values, load_dataset, run_full_pipeline, Config, Dataset, PipelineOutput,
+    carry_rerank_panel, carry_rerank_values, golden_values, load_dataset, run_full_pipeline,
+    CarryRerankInputs, Config, Dataset, PipelineOutput,
 };
 pub use strategies::{
     apply_gate, carry_positions, carry_total_returns, ewma_variance, momentum_positions,

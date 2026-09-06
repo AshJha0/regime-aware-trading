@@ -27,10 +27,65 @@
 //! `gamma_t(i) = a^_t(i) * b^_t(i)` and
 //! `xi_t(i,j) = a^_t(i) A_ij bt_{t+1}(j) b^_{t+1}(j) / d_{t+1}`.
 
+//!
+//! # Dead-state guard (pinned, API_SPEC.md §1.4)
+//!
+//! After each E-step the transition-row support `sum_{t<T} gamma_t(i)` of
+//! every state is checked against [`DEAD_STATE_SUPPORT`]; a state below it
+//! has no posterior mass (Rabiner 1989 §V.B, Bilmes 1998 §4) and the M-step
+//! would produce `0/0`.  EM then stops with the just-scored parameters,
+//! `converged = false` and `dead_state = Some(i)`.  No NaN ever leaves
+//! `fit`.  A zero forward normalizer (data impossible under every reachable
+//! state) is an error.
+
 use crate::error::{RegimeError, Result};
 use crate::matrix::Matrix;
 
 const LOG_2PI: f64 = 1.8378770664093453; // ln(2*pi)
+
+/// Pinned dead-state threshold on `sum_{t<T} gamma_t(i)` (API_SPEC.md §1.4).
+pub const DEAD_STATE_SUPPORT: f64 = 1e-12;
+/// Pinned relative tolerance for a log-likelihood decrease to count as a
+/// monotonicity violation (API_SPEC.md §1.4).
+pub const MONOTONE_REL_TOL: f64 = 1e-6;
+/// Pinned tolerance on `sum(startprob)` and on every transition row sum.
+pub const STOCHASTIC_TOL: f64 = 1e-9;
+
+/// Classification of one E-step score against the previous one (pinned).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmStep {
+    /// Improvement at or above `tol`: keep iterating.
+    Continue,
+    /// Improvement below `tol` (and no violation): converged.
+    Converged,
+    /// A decrease beyond `MONOTONE_REL_TOL * max(1, |ll_prev|)` or a
+    /// non-finite score: a numerical fault, never convergence.
+    NonMonotone,
+}
+
+/// Pinned rule (API_SPEC.md §1.4): `NonMonotone` if
+/// `ll - ll_prev < -MONOTONE_REL_TOL * max(1, |ll_prev|)` or either score is
+/// non-finite; else `Converged` if `ll - ll_prev < tol`; else `Continue`.
+pub fn em_step_status(ll: f64, ll_prev: f64, tol: f64) -> EmStep {
+    if !ll.is_finite() || !ll_prev.is_finite() {
+        return EmStep::NonMonotone;
+    }
+    let delta = ll - ll_prev;
+    if delta < -MONOTONE_REL_TOL * ll_prev.abs().max(1.0) {
+        return EmStep::NonMonotone;
+    }
+    if delta < tol {
+        return EmStep::Converged;
+    }
+    EmStep::Continue
+}
+
+fn zero_normalizer(t: usize) -> RegimeError {
+    RegimeError::InvalidInput(format!(
+        "forward normalizer is zero at t={t}: the observation has zero likelihood under \
+         every reachable state (parameters and data are incompatible)"
+    ))
+}
 
 /// Parameter set of a diagonal-covariance Gaussian HMM.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,19 +100,92 @@ pub struct HmmParams {
     pub variances: Matrix,
 }
 
+/// Validate a parameter set against a model size (pinned, API_SPEC.md §1.9):
+/// `startprob` length `K`, `transmat` `K x K`, `means`/`variances` `K x D`,
+/// every entry finite, `variances > 0`, `startprob` and every transition row
+/// non-negative and summing to 1 within [`STOCHASTIC_TOL`].
+///
+/// # Errors
+/// `RegimeError::InvalidInput` on any violation (never a panic).
+pub fn validate_params(p: &HmmParams, n_states: usize, n_dims: usize) -> Result<()> {
+    let (k, d) = (n_states, n_dims);
+    let bad = |msg: String| Err(RegimeError::InvalidInput(msg));
+    if p.startprob.len() != k {
+        return bad(format!("startprob length {} does not match n_states={k}", p.startprob.len()));
+    }
+    if p.transmat.rows() != k || p.transmat.cols() != k {
+        return bad(format!(
+            "transmat shape {}x{} does not match n_states={k}",
+            p.transmat.rows(),
+            p.transmat.cols()
+        ));
+    }
+    if p.means.rows() != k || p.means.cols() != d {
+        return bad(format!(
+            "means shape {}x{} does not match (n_states, D)=({k}, {d})",
+            p.means.rows(),
+            p.means.cols()
+        ));
+    }
+    if p.variances.rows() != k || p.variances.cols() != d {
+        return bad(format!(
+            "variances shape {}x{} does not match (n_states, D)=({k}, {d})",
+            p.variances.rows(),
+            p.variances.cols()
+        ));
+    }
+    if p.startprob.iter().any(|v| !v.is_finite()) {
+        return bad("startprob contain NaN or inf".into());
+    }
+    if !p.transmat.all_finite() {
+        return bad("transmat contain NaN or inf".into());
+    }
+    if !p.means.all_finite() {
+        return bad("means contain NaN or inf".into());
+    }
+    if !p.variances.all_finite() {
+        return bad("variances contain NaN or inf".into());
+    }
+    if (0..k).any(|i| (0..d).any(|j| !(p.variances.get(i, j) > 0.0))) {
+        return bad("variances must be > 0".into());
+    }
+    let sp: f64 = p.startprob.iter().sum();
+    if p.startprob.iter().any(|&v| v < 0.0) || (sp - 1.0).abs() > STOCHASTIC_TOL {
+        return bad("startprob must be non-negative and sum to 1".into());
+    }
+    for i in 0..k {
+        let row = p.transmat.row(i);
+        let sum: f64 = row.iter().sum();
+        if row.iter().any(|&v| v < 0.0) || (sum - 1.0).abs() > STOCHASTIC_TOL {
+            return bad("transmat rows must be non-negative and sum to 1".into());
+        }
+    }
+    Ok(())
+}
+
 /// Outcome of a Baum-Welch fit.
 #[derive(Debug, Clone)]
 pub struct HmmFitResult {
-    /// Log-likelihood of the returned parameter set.
+    /// Log-likelihood of the returned parameter set (always finite; the
+    /// score of exactly the returned parameters).
     pub log_likelihood: f64,
-    /// Number of E-steps performed.
+    /// Number of E-steps that appended to `loglik_history` (the consistency
+    /// re-score after `max_iter` exhaustion is not counted).
     pub n_iter: usize,
     /// True iff the log-likelihood improvement fell below `tol` before
-    /// `max_iter` was reached.  Non-convergence is reported through this
-    /// flag, never as an error (API_SPEC.md §1.4).
+    /// `max_iter` was reached, with no monotonicity violation and no dead
+    /// state.  Non-convergence is reported through this flag, never as an
+    /// error (API_SPEC.md §1.4).
     pub converged: bool,
-    /// Log-likelihood at each E-step (non-decreasing, EM monotonicity).
+    /// Log-likelihood at each counted E-step.
     pub loglik_history: Vec<f64>,
+    /// False iff an E-step decreased the log-likelihood beyond
+    /// `MONOTONE_REL_TOL * max(1, |ll_prev|)` (EM stops there; `converged`
+    /// is then false).
+    pub monotone: bool,
+    /// Lowest state whose support `sum_{t<T} gamma_t(i)` fell below
+    /// [`DEAD_STATE_SUPPORT`] (EM stops there; `converged` is then false).
+    pub dead_state: Option<usize>,
 }
 
 /// Validate observations of shape `(T, D)` with `D` in {1, 2}.
@@ -145,14 +273,34 @@ impl GaussianHmm {
 
     /// Install an externally supplied parameter set (used by tests and the
     /// tiny enumerated ground-truth cases).
-    pub fn set_params(&mut self, params: HmmParams) {
+    ///
+    /// # Errors
+    /// The set must be valid for `n_states` with `D` in {1, 2}
+    /// ([`validate_params`]).
+    pub fn set_params(&mut self, params: HmmParams) -> Result<()> {
+        let d = params.means.cols();
+        if d == 0 || d > 2 {
+            return Err(RegimeError::InvalidInput(format!(
+                "only univariate or 2-D parameters supported, got D={d}"
+            )));
+        }
+        validate_params(&params, self.n_states, d)?;
         self.params = Some(params);
+        Ok(())
     }
 
     fn require_fitted(&self) -> Result<&HmmParams> {
         self.params
             .as_ref()
             .ok_or_else(|| RegimeError::InvalidInput("model is not fitted; call fit() first".into()))
+    }
+
+    /// Validate `x` and the fitted parameters' agreement with `(n_states, D)`.
+    fn prepare(&self, x: &Matrix) -> Result<&HmmParams> {
+        let params = self.require_fitted()?;
+        validate_obs(x)?;
+        validate_params(params, self.n_states, x.cols())?;
+        Ok(params)
     }
 
     // ------------------------------------------------------------------ //
@@ -231,7 +379,7 @@ impl GaussianHmm {
     /// Scaled forward pass; returns `(alpha_hat, d, m)` with the scaled
     /// forward variables `(T, K)`, per-step normalizers `d` and log-emission
     /// shifts `m`.  The log-likelihood is `sum_t (ln d_t + m_t)`.
-    fn forward(logb: &Matrix, params: &HmmParams) -> (Matrix, Vec<f64>, Vec<f64>) {
+    fn forward(logb: &Matrix, params: &HmmParams) -> Result<(Matrix, Vec<f64>, Vec<f64>)> {
         let (t_len, k) = (logb.rows(), logb.cols());
         let mut m = vec![0.0; t_len];
         let mut bt = Matrix::zeros(t_len, k);
@@ -249,6 +397,9 @@ impl GaussianHmm {
             a[i] = params.startprob[i] * bt.get(0, i);
         }
         d[0] = a.iter().sum();
+        if !(d[0] > 0.0) {
+            return Err(zero_normalizer(0));
+        }
         for i in 0..k {
             alpha.set(0, i, a[i] / d[0]);
         }
@@ -261,11 +412,14 @@ impl GaussianHmm {
                 *aj = s * bt.get(t, j);
             }
             d[t] = a.iter().sum();
+            if !(d[t] > 0.0) {
+                return Err(zero_normalizer(t));
+            }
             for j in 0..k {
                 alpha.set(t, j, a[j] / d[t]);
             }
         }
-        (alpha, d, m)
+        Ok((alpha, d, m))
     }
 
     /// Scaled backward pass sharing the forward normalizers `d`.
@@ -294,29 +448,31 @@ impl GaussianHmm {
     // ------------------------------------------------------------------ //
 
     /// Log-likelihood of `x` under the fitted parameters.
+    ///
+    /// # Errors
+    /// Unfitted model, invalid observations, a parameter set whose K/D
+    /// disagree with the model/data, or an observation with zero likelihood
+    /// under every reachable state.
     pub fn score(&self, x: &Matrix) -> Result<f64> {
-        let params = self.require_fitted()?;
-        validate_obs(x)?;
+        let params = self.prepare(x)?;
         let logb = Self::log_emissions(x, params);
-        let (_, d, m) = Self::forward(&logb, params);
+        let (_, d, m) = Self::forward(&logb, params)?;
         Ok(d.iter().zip(&m).map(|(dv, mv)| dv.ln() + mv).sum())
     }
 
     /// Filtered posteriors `P(s_t = i | x_1..t)`, shape `(T, K)`.
     pub fn filtered_probabilities(&self, x: &Matrix) -> Result<Matrix> {
-        let params = self.require_fitted()?;
-        validate_obs(x)?;
+        let params = self.prepare(x)?;
         let logb = Self::log_emissions(x, params);
-        let (alpha, _, _) = Self::forward(&logb, params);
+        let (alpha, _, _) = Self::forward(&logb, params)?;
         Ok(alpha)
     }
 
     /// Smoothed posteriors `P(s_t = i | x_1..T)`, shape `(T, K)`.
     pub fn smoothed_probabilities(&self, x: &Matrix) -> Result<Matrix> {
-        let params = self.require_fitted()?;
-        validate_obs(x)?;
+        let params = self.prepare(x)?;
         let logb = Self::log_emissions(x, params);
-        let (alpha, d, m) = Self::forward(&logb, params);
+        let (alpha, d, m) = Self::forward(&logb, params)?;
         let beta = Self::backward(&logb, params, &d, &m);
         let (t_len, k) = (alpha.rows(), alpha.cols());
         let mut gamma = Matrix::zeros(t_len, k);
@@ -332,8 +488,7 @@ impl GaussianHmm {
     ///
     /// Ties are broken toward the lower state index (first argmax).
     pub fn viterbi(&self, x: &Matrix) -> Result<Vec<usize>> {
-        let params = self.require_fitted()?;
-        validate_obs(x)?;
+        let params = self.prepare(x)?;
         let logb = Self::log_emissions(x, params);
         let (t_len, k) = (logb.rows(), logb.cols());
         let log_a: Vec<f64> = (0..k * k)
@@ -373,17 +528,32 @@ impl GaussianHmm {
         Ok(states)
     }
 
-    /// Stationary distribution of the fitted transition matrix.
-    ///
-    /// Pinned power method (API_SPEC.md §1.7): start from the uniform vector
-    /// and iterate `pi <- pi A` with L1 renormalization until
-    /// `max_i |pi_new_i - pi_i| < 1e-13` or 10000 iterations.
+    /// Stationary distribution of the fitted transition matrix with the
+    /// pinned controls `tol = 1e-13`, `max_iter = 10000` (API_SPEC.md §1.7).
     pub fn stationary_distribution(&self) -> Result<Vec<f64>> {
+        self.stationary_distribution_with(1e-13, 10_000)
+    }
+
+    /// Stationary distribution by the pinned power method with explicit
+    /// controls: start from the uniform vector and iterate `pi <- pi A` with
+    /// L1 renormalization until `max_i |pi_new_i - pi_i| < tol`.
+    ///
+    /// # Errors
+    /// Unfitted/invalid parameters, `tol <= 0`, `max_iter < 1`, or no
+    /// convergence within `max_iter` iterations (a periodic or reducible
+    /// chain) — an unconverged vector is never returned as stationary.
+    pub fn stationary_distribution_with(&self, tol: f64, max_iter: usize) -> Result<Vec<f64>> {
         let params = self.require_fitted()?;
         let k = self.n_states;
+        validate_params(params, k, params.means.cols())?;
+        if !(tol > 0.0) || max_iter < 1 {
+            return Err(RegimeError::InvalidInput(
+                "stationary_distribution: tol must be > 0 and max_iter >= 1".into(),
+            ));
+        }
         let mut pi = vec![1.0 / k as f64; k];
         let mut nxt = vec![0.0; k];
-        for _ in 0..10_000 {
+        for _ in 0..max_iter {
             for (j, nx) in nxt.iter_mut().enumerate() {
                 let mut s = 0.0;
                 for (i, p) in pi.iter().enumerate() {
@@ -401,11 +571,14 @@ impl GaussianHmm {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             pi.copy_from_slice(&nxt);
-            if diff < 1e-13 {
+            if diff < tol {
                 return Ok(pi);
             }
         }
-        Ok(pi)
+        Err(RegimeError::InvalidInput(format!(
+            "stationary distribution did not converge in {max_iter} power-method iterations \
+             (periodic or reducible transition matrix)"
+        )))
     }
 
     /// Free parameter count for a diagonal-covariance model:
@@ -440,7 +613,12 @@ impl GaussianHmm {
     /// permuted once so `means[:, 0]` is ascending (§1.5).
     ///
     /// # Errors
-    /// Invalid observations or `T <= n_states`.
+    /// Invalid observations, `T <= n_states`, a warm-start `init` whose
+    /// shapes/stochasticity disagree with `(n_states, D)` (API_SPEC.md
+    /// §1.9), or an observation with zero likelihood under every reachable
+    /// state.  A dead state or a monotonicity violation is *not* an error:
+    /// it is reported through `dead_state` / `monotone` with
+    /// `converged = false`.
     pub fn fit(&mut self, x: &Matrix, init: Option<&HmmParams>) -> Result<HmmFitResult> {
         validate_obs(x)?;
         let t_len = x.rows();
@@ -451,26 +629,49 @@ impl GaussianHmm {
             )));
         }
         let mut params = match init {
-            Some(p) => p.clone(),
+            Some(p) => {
+                validate_params(p, k, d_dim)?;
+                p.clone()
+            }
             None => self.pinned_init(x)?,
         };
 
         let mut history: Vec<f64> = Vec::new();
         let mut ll_prev = f64::NEG_INFINITY;
         let mut converged = false;
+        let mut monotone = true;
+        let mut dead_state: Option<usize> = None;
+        let mut exhausted = true;
         let mut n_iter = 0usize;
         let mut ll = f64::NAN;
 
         for _ in 0..self.max_iter {
             // E-step: scores the CURRENT parameters.
             let logb = Self::log_emissions(x, &params);
-            let (alpha, d, m) = Self::forward(&logb, &params);
+            let (alpha, d, m) = Self::forward(&logb, &params)?;
             ll = d.iter().zip(&m).map(|(dv, mv)| dv.ln() + mv).sum();
+            if !ll.is_finite() {
+                // Unreachable after the d_t > 0 guard; kept as a hard stop.
+                return Err(RegimeError::InvalidInput(
+                    "EM produced a non-finite log-likelihood".into(),
+                ));
+            }
             history.push(ll);
             n_iter += 1;
-            if n_iter > 1 && ll - ll_prev < self.tol {
-                converged = true;
-                break;
+            if n_iter > 1 {
+                match em_step_status(ll, ll_prev, self.tol) {
+                    EmStep::NonMonotone => {
+                        monotone = false;
+                        exhausted = false;
+                        break;
+                    }
+                    EmStep::Converged => {
+                        converged = true;
+                        exhausted = false;
+                        break;
+                    }
+                    EmStep::Continue => {}
+                }
             }
             ll_prev = ll;
             let beta = Self::backward(&logb, &params, &d, &m);
@@ -481,6 +682,24 @@ impl GaussianHmm {
                 for i in 0..k {
                     gamma.set(t, i, alpha.get(t, i) * beta.get(t, i));
                 }
+            }
+
+            // Dead-state guard (pinned): a state without posterior support
+            // cannot be re-estimated; stop with the just-scored parameters.
+            let mut gsum = vec![0.0; k];
+            let mut gsum_trans = vec![0.0; k];
+            for t in 0..t_len {
+                for i in 0..k {
+                    gsum[i] += gamma.get(t, i);
+                    if t < t_len - 1 {
+                        gsum_trans[i] += gamma.get(t, i);
+                    }
+                }
+            }
+            dead_state = gsum_trans.iter().position(|&s| s < DEAD_STATE_SUPPORT);
+            if dead_state.is_some() {
+                exhausted = false;
+                break;
             }
 
             // xi summed over t: xi_sum[i][j] = A_ij * sum_t alpha_t(i) *
@@ -497,16 +716,6 @@ impl GaussianHmm {
             }
 
             // M-step.
-            let mut gsum = vec![0.0; k];
-            let mut gsum_trans = vec![0.0; k];
-            for t in 0..t_len {
-                for i in 0..k {
-                    gsum[i] += gamma.get(t, i);
-                    if t < t_len - 1 {
-                        gsum_trans[i] += gamma.get(t, i);
-                    }
-                }
-            }
             for i in 0..k {
                 params.startprob[i] = gamma.get(0, i);
                 for j in 0..k {
@@ -535,11 +744,11 @@ impl GaussianHmm {
             }
         }
 
-        if !converged {
+        if exhausted {
             // max_iter exhausted: params had one more M-step than the last
             // recorded E-step, so score them once for a consistent report.
             let logb = Self::log_emissions(x, &params);
-            let (_, d, m) = Self::forward(&logb, &params);
+            let (_, d, m) = Self::forward(&logb, &params)?;
             ll = d.iter().zip(&m).map(|(dv, mv)| dv.ln() + mv).sum();
         }
 
@@ -570,7 +779,14 @@ impl GaussianHmm {
             }
         }
         self.params = Some(sorted);
-        let result = HmmFitResult { log_likelihood: ll, n_iter, converged, loglik_history: history };
+        let result = HmmFitResult {
+            log_likelihood: ll,
+            n_iter,
+            converged,
+            loglik_history: history,
+            monotone,
+            dead_state,
+        };
         self.fit_result = Some(result.clone());
         Ok(result)
     }
@@ -582,9 +798,36 @@ impl GaussianHmm {
 /// new observation, returns `P(s_t | x_1..t)`.  Identical math to one step
 /// of the batch forward pass; used by the regime gate between refits so the
 /// filter never re-reads the past.
-pub fn forward_step(params: &HmmParams, alpha_prev: &[f64], x_t: &[f64]) -> Vec<f64> {
+///
+/// # Errors
+/// Invalid `params` ([`validate_params`]), `alpha_prev` not a length-`K`
+/// probability vector, `x_t` not length `D` / finite, or an observation
+/// with zero likelihood under every reachable state.
+pub fn forward_step(params: &HmmParams, alpha_prev: &[f64], x_t: &[f64]) -> Result<Vec<f64>> {
     let k = params.startprob.len();
     let d_dim = params.means.cols();
+    validate_params(params, k, d_dim)?;
+    if alpha_prev.len() != k {
+        return Err(RegimeError::InvalidInput(format!(
+            "alpha_prev length {} does not match n_states={k}",
+            alpha_prev.len()
+        )));
+    }
+    let asum: f64 = alpha_prev.iter().sum();
+    if alpha_prev.iter().any(|&v| !v.is_finite() || v < 0.0) || (asum - 1.0).abs() > STOCHASTIC_TOL {
+        return Err(RegimeError::InvalidInput(
+            "alpha_prev must be finite, non-negative and sum to 1".into(),
+        ));
+    }
+    if x_t.len() != d_dim {
+        return Err(RegimeError::InvalidInput(format!(
+            "observation length {} does not match D={d_dim}",
+            x_t.len()
+        )));
+    }
+    if x_t.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("observation contains NaN or inf".into()));
+    }
     let mut logb = vec![0.0; k];
     for (i, lb) in logb.iter_mut().enumerate() {
         let mut acc = 0.0;
@@ -605,8 +848,13 @@ pub fn forward_step(params: &HmmParams, alpha_prev: &[f64], x_t: &[f64]) -> Vec<
         *aj = s * (logb[j] - mx).exp();
     }
     let total: f64 = a.iter().sum();
+    if !(total > 0.0) {
+        return Err(RegimeError::InvalidInput(
+            "forward step: the observation has zero likelihood under every reachable state".into(),
+        ));
+    }
     for v in a.iter_mut() {
         *v /= total;
     }
-    a
+    Ok(a)
 }

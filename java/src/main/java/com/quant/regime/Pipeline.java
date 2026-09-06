@@ -22,9 +22,11 @@ import java.util.Map;
  * <p>Label conventions (pinned): HMM states are sorted by mean ascending, so
  * on this data state 0 = crisis (lowest mean, highest vol). The bundled true
  * states use the generator's ordering (0 = calm-bull, 1 = choppy,
- * 2 = crisis); the pinned volatility mapping (calm to the lowest-variance
- * fitted label, crisis to the highest-variance one) aligns them for the
- * Viterbi-accuracy teaching number.
+ * 2 = crisis); the pinned volatility mapping of the full-sample K=3 fit (calm
+ * to the lowest-variance fitted label, crisis to the highest-variance one)
+ * aligns them for the Viterbi-accuracy teaching number. The crisis table
+ * always uses that K=3 fit, whatever config nStates the walk-forward gate
+ * uses.
  */
 public final class Pipeline {
 
@@ -123,6 +125,9 @@ public final class Pipeline {
         Csv fx = readCsv(dataDir.resolve("fx_carry.csv"));
         Csv truth = readCsv(dataDir.resolve("true_states.csv"));
         int t2 = idx.rows.size();
+        if (t2 == 0) {
+            throw new IllegalArgumentException("bundled CSVs are empty");
+        }
         if (trend.rows.size() != t2 || fx.rows.size() != t2 || truth.rows.size() != t2) {
             throw new IllegalArgumentException("bundled CSVs have inconsistent lengths");
         }
@@ -133,6 +138,9 @@ public final class Pipeline {
             dates[t] = LocalDate.parse(idx.rows.get(t)[0]);
             indexReturns[t] = Double.parseDouble(idx.rows.get(t)[idx.col("ret")]);
             trueStates[t] = Integer.parseInt(truth.rows.get(t)[truth.col("state")]);
+            if (trueStates[t] < 0 || trueStates[t] > 2) {
+                throw new IllegalArgumentException("true_states.csv: state labels must be integers in [0, 2]");
+            }
         }
         double[][] trendReturns = numericBlock(trend, "asset_");
         double[][] spot = numericBlock(fx, "spot_ret_");
@@ -197,11 +205,13 @@ public final class Pipeline {
         double[][] smoothed3 = hmm3.smoothedProbabilities(rIdx);
         double[] stationary3 = hmm3.stationaryDistribution();
 
-        // Teaching comparison via the pinned volatility mapping: calm-bull ->
-        // argmin variance, crisis -> argmax variance, choppy -> the rest.
+        // Teaching comparison via the pinned volatility mapping of the K=3 fit
+        // (independent of the gate's config nStates): calm-bull -> argmin
+        // variance, crisis -> argmax variance, choppy -> the rest.
+        int k3 = hmm3.nStates();
         int calmLabel = 0;
         int crisisLabel = 0;
-        for (int i = 1; i < 3; i++) {
+        for (int i = 1; i < k3; i++) {
             if (hmm3.params().variances[i][0] < hmm3.params().variances[calmLabel][0]) {
                 calmLabel = i;
             }
@@ -255,15 +265,16 @@ public final class Pipeline {
         }
 
         // Crisis table: attribute daily strategy returns to the full-sample
-        // K=3 Viterbi state (state 0 = crisis on this data).
+        // K=3 Viterbi state (state 0 = crisis on this data); the table has k3
+        // rows regardless of the gate's nStates.
         Map<String, Backtest.StateStats[]> crisis = new LinkedHashMap<>();
         for (Map.Entry<String, Backtest.Result> e : results.entrySet()) {
             crisis.put(e.getKey(),
-                    Backtest.stateConditionalReturns(e.getValue().netReturns(), viterbi3, k));
+                    Backtest.stateConditionalReturns(e.getValue().netReturns(), viterbi3, k3));
         }
         for (String tag : new String[] {"unfiltered", "filtered"}) {
             crisis.put("combined_" + tag,
-                    Backtest.stateConditionalReturns(combinedNet.get(tag), viterbi3, k));
+                    Backtest.stateConditionalReturns(combinedNet.get(tag), viterbi3, k3));
         }
 
         return new Result(ds, cfg, hmm2, fit2, hmm3, fit3, viterbi3, smoothed3, stationary3,
@@ -339,7 +350,12 @@ public final class Pipeline {
         return d;
     }
 
+    /** Integer config value; a non-integral number (e.g. 3.5) is rejected so the loaders agree. */
     private static int cfgInt(Map<?, ?> cfg, String key) {
-        return (int) Math.round(cfgDouble(cfg, key));
+        double v = cfgDouble(cfg, key);
+        if (!Double.isFinite(v) || v != Math.floor(v) || Math.abs(v) > 1e9) {
+            throw new IllegalArgumentException("config.json key '" + key + "' must be an integer, got " + v);
+        }
+        return (int) v;
     }
 }

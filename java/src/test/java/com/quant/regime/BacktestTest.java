@@ -6,6 +6,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.time.LocalDate;
+import java.util.Arrays;
 import java.util.Random;
 import org.junit.Test;
 
@@ -191,5 +192,117 @@ public class BacktestTest {
             assertTrue("cost " + bps + " helped", prev >= total - 1e-12);
             prev = total;
         }
+    }
+
+    // ------------------------------------------------------------------ //
+    // Robustness: wipe-outs, dates, degenerate shapes
+    // ------------------------------------------------------------------ //
+
+    @Test
+    public void backtestWipeoutIsError() {
+        // PT-5: 4x leverage into a -30% day is a -120% net day -> error naming t.
+        double[][] p = {{4.0}, {4.0}, {4.0}};
+        double[][] r = {{0.0}, {-0.3}, {0.1}};
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> Backtest.run(p, r, 0.0, null));
+        assertTrue(e.getMessage().contains("wiped out on day t=1"));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.computeMetrics(new double[] {0.01, -1.0, 0.02}, null));
+        // exactly -100% net on day 0 via costs alone is a wipe-out too
+        e = assertThrows(IllegalArgumentException.class,
+                () -> Backtest.run(new double[][] {{1.0}}, new double[][] {{0.0}}, 1e4, null));
+        assertTrue(e.getMessage().contains("t=0"));
+        // invariant on accepted input: max_dd >= -1 and equity > 0
+        Backtest.Result res = Backtest.run(p, new double[][] {{0.0}, {-0.2}, {0.1}}, 0.0, null);
+        assertTrue(res.metrics().maxDd() >= -1.0);
+        for (double eq : res.equity()) {
+            assertTrue(eq > 0.0);
+        }
+        assertEquals(0.2, res.equity()[1], 1e-15);
+    }
+
+    @Test
+    public void backtestRejectsReturnsBelowMinusOne() {
+        double[][] p = {{1.0}, {1.0}, {1.0}};
+        for (double bad : new double[] {-1.0, -1.5}) {
+            double[][] r = {{0.0}, {bad}, {0.0}};
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> Backtest.run(p, r, 0.0, null));
+            assertTrue(e.getMessage().contains("<= -100%"));
+        }
+    }
+
+    @Test
+    public void computeMetricsDatesLengthMismatch() {
+        // PT-7: the public metrics function validates dates itself.
+        LocalDate[] three = {LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2), LocalDate.of(2020, 1, 3)};
+        assertThrows(IllegalArgumentException.class, () -> Backtest.computeMetrics(new double[5], three));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.run(new double[5][1], new double[5][1], 0.0, three));
+    }
+
+    @Test
+    public void datesMustBeStrictlyIncreasing() {
+        // PT-8 / MAJ-6: duplicated, out-of-order or null dates are rejected.
+        double[][] p = {{1.0}, {1.0}, {1.0}};
+        double[][] r = new double[3][1];
+        LocalDate[][] bad = {
+            {LocalDate.of(2020, 1, 2), LocalDate.of(2020, 1, 2), LocalDate.of(2020, 1, 3)},
+            {LocalDate.of(2020, 2, 3), LocalDate.of(2020, 1, 2), LocalDate.of(2020, 1, 3)},
+            {LocalDate.of(2020, 1, 2), null, LocalDate.of(2020, 1, 3)},
+        };
+        for (LocalDate[] dates : bad) {
+            assertThrows(IllegalArgumentException.class, () -> Backtest.run(p, r, 0.0, dates));
+            assertThrows(IllegalArgumentException.class, () -> Backtest.computeMetrics(new double[3], dates));
+        }
+        // sorted but non-contiguous months: pinned "contiguous runs" == calendar months
+        LocalDate[] dates = {LocalDate.of(2020, 1, 2), LocalDate.of(2020, 1, 31), LocalDate.of(2020, 3, 2)};
+        Backtest.Metrics m = Backtest.computeMetrics(new double[] {-0.01, -0.02, 0.05}, dates);
+        assertEquals(0.99 * 0.98 - 1.0, m.worstMonth(), 1e-15);
+    }
+
+    @Test
+    public void worstMonthBlockFallback() {
+        // PT-11: without dates, consecutive 21-day blocks; trailing partial dropped.
+        double[] net = new double[45];
+        for (int t = 21; t < 42; t++) {
+            net[t] = -0.01;
+        }
+        net[43] = -0.5; // in the dropped tail; must not count
+        Backtest.Metrics m = Backtest.computeMetrics(net, null);
+        assertEquals(Math.pow(0.99, 21) - 1.0, m.worstMonth(), 1e-12);
+        double[] five = new double[5];
+        Arrays.fill(five, -0.01);
+        assertEquals(Math.pow(0.99, 5) - 1.0, Backtest.computeMetrics(five, null).worstMonth(), 1e-15);
+    }
+
+    @Test
+    public void backtestRejectsZeroAssets() {
+        // MAJ-7: A = 0 columns is an error in every language (was silently zero).
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> Backtest.run(new double[3][0], new double[3][0], 0.0, null));
+        assertTrue(e.getMessage().contains("no assets"));
+    }
+
+    @Test
+    public void maxDrawdownRequiresPositiveEquity() {
+        assertThrows(IllegalArgumentException.class, () -> Backtest.maxDrawdown(new double[] {1.0, 0.0, 0.5}));
+        assertThrows(IllegalArgumentException.class, () -> Backtest.maxDrawdown(new double[] {1.0, -0.2}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.maxDrawdown(new double[] {1.0, Double.POSITIVE_INFINITY}));
+    }
+
+    @Test
+    public void stateConditionalReturnsValidation() {
+        // MIN-13: labels outside [0, K) and K < 1 are errors, never dropped.
+        double[] net = new double[4];
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.stateConditionalReturns(net, new int[] {0, 1, 2, 3}, 3));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.stateConditionalReturns(net, new int[] {0, -1, 0, 0}, 3));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.stateConditionalReturns(net, new int[4], 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.stateConditionalReturns(new double[] {0.0, Double.NaN, 0.0, 0.0}, new int[4], 1));
     }
 }
