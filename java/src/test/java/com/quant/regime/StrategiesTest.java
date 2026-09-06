@@ -217,4 +217,130 @@ public class StrategiesTest {
         assertThrows(IllegalArgumentException.class,
                 () -> Strategies.applyGate(pos, new double[] {1.0, 0.5, 0.0}));
     }
+
+    // ------------------------------------------------------------------ //
+    // Robustness: corrupt returns, re-ranking, gate edges
+    // ------------------------------------------------------------------ //
+
+    @Test
+    public void momentumRejectsReturnsBelowMinusOne() {
+        // PT-4: a -100% (or worse) print is corrupt data, not a signal.
+        for (double bad : new double[] {-1.0, -1.5}) {
+            double[][] r = constant(300, 0.001);
+            r[10][0] = bad;
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> Strategies.momentumPositions(r, 252, 0.10, 0.94, 4.0));
+            assertTrue(e.getMessage().contains("<= -100%"));
+            assertThrows(IllegalArgumentException.class, () -> Strategies.ewmaVariance(r, 0.94, 252));
+            assertThrows(IllegalArgumentException.class,
+                    () -> Strategies.carryTotalReturns(r, new double[300][1]));
+        }
+        // -99.9% is legal (extreme, but a valid simple return).
+        double[][] r = constant(300, 0.001);
+        r[10][0] = -0.999;
+        for (double[] row : Strategies.momentumPositions(r, 252, 0.10, 0.94, 4.0)) {
+            assertTrue(Double.isFinite(row[0]));
+        }
+        // Rate differentials are not simple returns: -1.5 is accepted there.
+        assertEquals(10, Strategies.carryPositions(constant(10, -1.5, -1.5, -1.5, -1.5), 1, 1, 21).length);
+    }
+
+    @Test
+    public void carryRerankAfterCrossing() {
+        // PT-6: the book flips exactly at the first rebalance after the ranks
+        // cross, with turnover 4 (two full round-trips) on that day only.
+        double[][] d = new double[45][];
+        for (int t = 0; t < 45; t++) {
+            d[t] = t < 21 ? new double[] {0.04, 0.03, 0.02, 0.01} : new double[] {0.01, 0.02, 0.03, 0.04};
+        }
+        double[][] pos = Strategies.carryPositions(d, 1, 1, 21);
+        assertArrayEquals(new double[] {1.0, 0.0, 0.0, -1.0}, pos[20], 0.0);
+        for (int t = 21; t < 42; t++) {
+            assertArrayEquals(new double[] {-1.0, 0.0, 0.0, 1.0}, pos[t], 0.0);
+        }
+        for (int t = 1; t < 45; t++) {
+            double to = 0.0;
+            for (int a = 0; a < 4; a++) {
+                to += Math.abs(pos[t][a] - pos[t - 1][a]);
+            }
+            assertEquals("turnover at t=" + t, t == 21 ? 4.0 : 0.0, to, 0.0);
+        }
+        // Tie at the crossing day -> ascending asset index decides.
+        double[][] tie = new double[45][];
+        for (int t = 0; t < 45; t++) {
+            tie[t] = t < 21 ? new double[] {0.04, 0.03, 0.02, 0.01} : new double[] {0.02, 0.02, 0.02, 0.02};
+        }
+        assertArrayEquals(new double[] {1.0, 0.0, 0.0, -1.0}, Strategies.carryPositions(tie, 1, 1, 21)[21], 0.0);
+    }
+
+    @Test
+    public void binaryGateThresholdEdges() {
+        // PT-12: the '>=' convention at both ends of [0, 1]; outside is an error.
+        double[] r = TestData.head(TestData.indexReturns(), 600);
+        double[] prob = Strategies.regimeGate(r, 3, 400, 300, "prob", 0.5, 1e-8, 500, 1e-8).gate();
+        double[] lo = Strategies.regimeGate(r, 3, 400, 300, "binary", 0.0, 1e-8, 500, 1e-8).gate();
+        double[] hi = Strategies.regimeGate(r, 3, 400, 300, "binary", 1.0, 1e-8, 500, 1e-8).gate();
+        for (int t = 399; t < 600; t++) {
+            assertEquals(1.0, lo[t], 0.0);
+            assertEquals(prob[t] == 1.0 ? 1.0 : 0.0, hi[t], 0.0);
+        }
+        for (double bad : new double[] {1.5, -0.1, Double.NaN}) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> Strategies.regimeGate(r, 3, 400, 300, "binary", bad, 1e-8, 500, 1e-8));
+            assertTrue(e.getMessage().contains("threshold"));
+        }
+    }
+
+    @Test
+    public void gateEdgeWindows() {
+        // PT-13: degenerate but legal walk-forward geometries.
+        double[] r = TestData.indexReturns();
+        Strategies.GateResult one = Strategies.regimeGate(TestData.head(r, 400), 3, 400, 63, "prob", 0.5,
+                1e-8, 500, 1e-8);
+        assertEquals(400, one.gate().length);
+        assertEquals(1, one.models().size());
+        for (int t = 0; t < 399; t++) {
+            assertEquals(1.0, one.gate()[t], 0.0);
+        }
+        assertTrue(one.gate()[399] >= 0.0 && one.gate()[399] <= 1.0);
+        Strategies.GateResult two = Strategies.regimeGate(TestData.head(r, 500), 3, 400, 1000, "prob", 0.5,
+                1e-8, 500, 1e-8);
+        assertEquals(1, two.models().size());
+        for (double g : two.gate()) {
+            assertTrue(g >= 0.0 && g <= 1.0);
+        }
+        Strategies.GateResult tiny = Strategies.regimeGate(TestData.head(r, 4), 3, 4, 1, "prob", 0.5,
+                1e-8, 500, 1e-8);
+        assertEquals(1, tiny.models().size());
+        for (double g : tiny.gate()) {
+            assertTrue(Double.isFinite(g));
+        }
+    }
+
+    @Test
+    public void regimeGateParameterValidation() {
+        // MAJ-7/MIN-11: schedule and HMM settings are validated before any fit.
+        double[] r = TestData.head(TestData.indexReturns(), 600);
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(r, 3, 3, 63, "prob", 0.5, 1e-8, 500, 1e-8));   // train <= K
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(r, 3, 400, 0, "prob", 0.5, 1e-8, 500, 1e-8));  // refit < 1
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(r, 1, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8)); // K < 2
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(r, 3, 400, 63, "prob", 0.5, 0.0, 500, 1e-8));  // tol <= 0
+        double[] nan = Arrays.copyOf(r, 601);
+        nan[600] = Double.NaN;
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(nan, 3, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8));
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(null, 3, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8));
+    }
+
+    @Test
+    public void applyGateRejectsNan() {
+        double[][] pos = constant(5, 1.0, 1.0);
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.applyGate(pos, new double[] {1.0, Double.NaN, 0.0, 0.0, 0.0}));
+    }
 }

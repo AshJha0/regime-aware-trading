@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -73,8 +74,14 @@ double json_number(const std::string& text, const std::string& key) {
     return std::stod(json_raw(text, key));
 }
 
+/// Integer config value; a non-integral number (e.g. 3.5) is rejected so the
+/// C++/Rust/Java loaders agree on the same file.
 int json_int(const std::string& text, const std::string& key) {
-    return static_cast<int>(std::llround(json_number(text, key)));
+    const double v = json_number(text, key);
+    if (!std::isfinite(v) || v != std::floor(v) || std::abs(v) > 1e9)
+        throw std::invalid_argument("config.json key '" + key + "' must be an integer, got " +
+                                    std::to_string(v));
+    return static_cast<int>(v);
 }
 
 PipelineConfig load_config(const std::string& path) {
@@ -129,7 +136,9 @@ Dataset load_dataset(const std::string& data_dir) {
     std::vector<std::vector<std::string>> rows;
 
     read_csv(data_dir + "/market_index.csv", header, rows);
+    if (rows.empty()) throw std::invalid_argument("bundled CSVs are empty");
     for (const auto& row : rows) {
+        if (row.size() < 2) throw std::invalid_argument("market_index.csv: ragged row");
         ds.dates.push_back(row[0]);
         ds.index_returns.push_back(std::stod(row[1]));
     }
@@ -152,15 +161,28 @@ Dataset load_dataset(const std::string& data_dir) {
     rows.clear();
     read_csv(data_dir + "/true_states.csv", header, rows);
     if (rows.size() != T) throw std::invalid_argument("bundled CSVs have inconsistent lengths");
-    for (const auto& row : rows) ds.true_states.push_back(std::stoi(row[1]));
+    for (const auto& row : rows) {
+        if (row.size() < 2) throw std::invalid_argument("true_states.csv: ragged row");
+        const int state = std::stoi(row[1]);
+        if (state < 0 || state > 2)
+            throw std::invalid_argument("true_states.csv: state labels must be integers in [0, 2]");
+        ds.true_states.push_back(state);
+    }
 
     ds.config = load_config(data_dir + "/config.json");
     return ds;
 }
 
 PipelineResult run_full_pipeline(const std::string& data_dir) {
+    return run_full_pipeline(data_dir, std::nullopt, std::nullopt);
+}
+
+PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int> refit_days,
+                                 std::optional<int> train_min_days) {
     Dataset ds = load_dataset(data_dir);
-    const PipelineConfig cfg = ds.config;  // copy: ds is moved into the result below
+    PipelineConfig cfg = ds.config;  // copy: ds is moved into the result below
+    if (refit_days) cfg.refit_days = *refit_days;
+    if (train_min_days) cfg.train_min_days = *train_min_days;
     const int K = cfg.n_states;
     const Matrix r_idx = to_matrix(ds.index_returns);
 
@@ -173,11 +195,14 @@ PipelineResult run_full_pipeline(const std::string& data_dir) {
     Matrix smoothed3 = hmm3.smoothed_probabilities(r_idx);
     std::vector<double> stationary3 = hmm3.stationary_distribution();
 
-    // Teaching comparison via the pinned volatility mapping: generator label
-    // calm-bull -> argmin variance, crisis -> argmax variance, choppy -> rest.
+    // Teaching comparison via the pinned volatility mapping of the K=3 fit:
+    // generator label calm-bull -> argmin variance, crisis -> argmax
+    // variance, choppy -> rest.  K3 is hmm3's state count (3), independent
+    // of the gate's config n_states.
+    const int K3 = hmm3.n_states();
     const Matrix& vars3 = hmm3.params().variances;
     int calm_label = 0, crisis_label = 0;
-    for (int k = 1; k < K; ++k) {
+    for (int k = 1; k < K3; ++k) {
         if (vars3(static_cast<std::size_t>(k), 0) < vars3(static_cast<std::size_t>(calm_label), 0))
             calm_label = k;
         if (vars3(static_cast<std::size_t>(k), 0) > vars3(static_cast<std::size_t>(crisis_label), 0))
@@ -230,12 +255,13 @@ PipelineResult run_full_pipeline(const std::string& data_dir) {
     }
 
     // Crisis table: attribute daily strategy returns to the full-sample
-    // K=3 Viterbi state (state 0 = crisis on this data, K-1 = bull).
+    // K=3 Viterbi state (state 0 = crisis on this data); the table has K3
+    // rows regardless of the gate's n_states.
     for (const auto& [name, res] : pipe.results)
-        pipe.crisis[name] = state_conditional_returns(res.net_returns, pipe.viterbi3, K);
+        pipe.crisis[name] = state_conditional_returns(res.net_returns, pipe.viterbi3, K3);
     for (const std::string tag : {"unfiltered", "filtered"})
         pipe.crisis["combined_" + tag] =
-            state_conditional_returns(pipe.combined.at(tag).net_returns, pipe.viterbi3, K);
+            state_conditional_returns(pipe.combined.at(tag).net_returns, pipe.viterbi3, K3);
 
     return pipe;
 }

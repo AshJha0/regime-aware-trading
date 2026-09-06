@@ -18,10 +18,149 @@ import java.util.Arrays;
  * sum of the log normalizers {@code sum_t (log d_t + m_t)}. The backward
  * pass shares the same {@code d_t}, so the posteriors
  * {@code gamma_t(i) = a^_t(i) * b^_t(i)} need no further normalization.
+ *
+ * <p><b>Dead-state guard</b> (pinned, API_SPEC 1.4). After each E-step the
+ * transition-row support {@code sum_{t<T} gamma_t(i)} of every state is
+ * checked against {@link #DEAD_STATE_SUPPORT}; a state below it has no
+ * posterior mass (Rabiner 1989 section V.B, Bilmes 1998 section 4) and the
+ * M-step would produce 0/0. EM then stops with the just-scored parameters,
+ * {@code converged = false} and {@code deadState = i}. No NaN ever leaves
+ * {@link #fit}. A zero forward normalizer (data impossible under every
+ * reachable state) throws.
  */
 public final class GaussianHmm {
 
     private static final double LOG_2PI = Math.log(2.0 * Math.PI);
+
+    /** Pinned dead-state threshold on {@code sum_{t<T} gamma_t(i)} (API_SPEC 1.4). */
+    public static final double DEAD_STATE_SUPPORT = 1e-12;
+    /** Pinned relative tolerance for a log-likelihood decrease to count as non-monotone. */
+    public static final double MONOTONE_REL_TOL = 1e-6;
+    /** Pinned tolerance on {@code sum(startprob)} and on every transition row sum. */
+    public static final double STOCHASTIC_TOL = 1e-9;
+
+    /** Classification of one E-step score against the previous one (pinned). */
+    public enum EmStep {
+        /** Improvement at or above the tolerance: keep iterating. */
+        CONTINUE,
+        /** Improvement below the tolerance (and no violation): converged. */
+        CONVERGED,
+        /** A decrease beyond the relative tolerance or a non-finite score. */
+        NON_MONOTONE
+    }
+
+    /**
+     * Pinned rule (API_SPEC 1.4): {@code NON_MONOTONE} if
+     * {@code ll - llPrev < -MONOTONE_REL_TOL * max(1, |llPrev|)} or either score
+     * is non-finite; else {@code CONVERGED} if {@code ll - llPrev < tol}; else
+     * {@code CONTINUE}.
+     *
+     * @param ll current E-step score
+     * @param llPrev previous E-step score
+     * @param tol convergence tolerance
+     * @return the classification
+     */
+    public static EmStep emStepStatus(double ll, double llPrev, double tol) {
+        if (!Double.isFinite(ll) || !Double.isFinite(llPrev)) {
+            return EmStep.NON_MONOTONE;
+        }
+        double delta = ll - llPrev;
+        if (delta < -MONOTONE_REL_TOL * Math.max(1.0, Math.abs(llPrev))) {
+            return EmStep.NON_MONOTONE;
+        }
+        if (delta < tol) {
+            return EmStep.CONVERGED;
+        }
+        return EmStep.CONTINUE;
+    }
+
+    /**
+     * Validates a parameter set against a model size (pinned, API_SPEC 1.9):
+     * {@code startprob} length K, {@code transmat} K x K, {@code means} and
+     * {@code variances} K x D, every entry finite, variances &gt; 0,
+     * {@code startprob} and every transition row non-negative and summing to
+     * 1 within {@link #STOCHASTIC_TOL}.
+     *
+     * @param p parameter set
+     * @param nStates expected K
+     * @param nDims expected D
+     * @throws IllegalArgumentException on any violation (never an
+     *     {@code ArrayIndexOutOfBoundsException} or {@code NullPointerException})
+     */
+    public static void validateParams(HmmParams p, int nStates, int nDims) {
+        if (p == null || p.startprob == null || p.transmat == null || p.means == null
+                || p.variances == null) {
+            throw new IllegalArgumentException("parameter set is null");
+        }
+        int k = nStates;
+        int d = nDims;
+        if (p.startprob.length != k) {
+            throw new IllegalArgumentException(
+                    "startprob length " + p.startprob.length + " does not match n_states=" + k);
+        }
+        checkShape(p.transmat, k, k, "transmat", "n_states=" + k);
+        checkShape(p.means, k, d, "means", "(n_states, D)=(" + k + ", " + d + ")");
+        checkShape(p.variances, k, d, "variances", "(n_states, D)=(" + k + ", " + d + ")");
+        for (double v : p.startprob) {
+            if (!Double.isFinite(v)) {
+                throw new IllegalArgumentException("startprob contain NaN or inf");
+            }
+        }
+        checkFinite(p.transmat, "transmat");
+        checkFinite(p.means, "means");
+        checkFinite(p.variances, "variances");
+        for (double[] row : p.variances) {
+            for (double v : row) {
+                if (!(v > 0.0)) {
+                    throw new IllegalArgumentException("variances must be > 0");
+                }
+            }
+        }
+        double sp = 0.0;
+        for (double v : p.startprob) {
+            if (v < 0.0) {
+                throw new IllegalArgumentException("startprob must be non-negative and sum to 1");
+            }
+            sp += v;
+        }
+        if (Math.abs(sp - 1.0) > STOCHASTIC_TOL) {
+            throw new IllegalArgumentException("startprob must be non-negative and sum to 1");
+        }
+        for (double[] row : p.transmat) {
+            double sum = 0.0;
+            for (double v : row) {
+                if (v < 0.0) {
+                    throw new IllegalArgumentException("transmat rows must be non-negative and sum to 1");
+                }
+                sum += v;
+            }
+            if (Math.abs(sum - 1.0) > STOCHASTIC_TOL) {
+                throw new IllegalArgumentException("transmat rows must be non-negative and sum to 1");
+            }
+        }
+    }
+
+    private static void checkShape(double[][] m, int rows, int cols, String name, String want) {
+        if (m.length != rows) {
+            throw new IllegalArgumentException(name + " shape " + m.length + "x? does not match " + want);
+        }
+        for (double[] row : m) {
+            if (row == null || row.length != cols) {
+                throw new IllegalArgumentException(name + " shape " + rows + "x"
+                        + (row == null ? "null" : String.valueOf(row.length)) + " does not match " + want);
+            }
+        }
+    }
+
+    private static void checkFinite(double[][] m, String name) {
+        for (double[] row : m) {
+            for (double v : row) {
+                if (!Double.isFinite(v)) {
+                    throw new IllegalArgumentException(name + " contain NaN or inf");
+                }
+            }
+        }
+    }
 
     private final int nStates;
     private final double tol;
@@ -76,8 +215,18 @@ public final class GaussianHmm {
         return params;
     }
 
-    /** Sets the parameters directly (for scoring hand-built models in tests). */
+    /**
+     * Sets the parameters directly (for scoring hand-built models in tests).
+     *
+     * @param p parameter set; must be valid for {@code nStates} with D in {1, 2}
+     * @throws IllegalArgumentException if invalid ({@link #validateParams})
+     */
     public void setParams(HmmParams p) {
+        if (p == null || p.means == null || p.means.length == 0 || p.means[0] == null
+                || (p.means[0].length != 1 && p.means[0].length != 2)) {
+            throw new IllegalArgumentException("only univariate or 2-D parameters supported");
+        }
+        validateParams(p, nStates, p.means[0].length);
         this.params = p;
     }
 
@@ -131,6 +280,14 @@ public final class GaussianHmm {
             throw new IllegalArgumentException("model is not fitted; call fit() first");
         }
         return params;
+    }
+
+    /** Validates x and the fitted parameters' agreement with (nStates, D). */
+    private HmmParams prepare(double[][] x) {
+        HmmParams p = requireFitted();
+        validate(x);
+        validateParams(p, nStates, x[0].length);
+        return p;
     }
 
     // ------------------------------------------------------------------ //
@@ -243,6 +400,9 @@ public final class GaussianHmm {
             alpha[0][i] = p.startprob[i] * bt[0][i];
             sum += alpha[0][i];
         }
+        if (!(sum > 0.0)) {
+            throw zeroNormalizer(0);
+        }
         d[0] = sum;
         for (int i = 0; i < k; i++) {
             alpha[0][i] /= sum;
@@ -258,12 +418,21 @@ public final class GaussianHmm {
                 alpha[t][j] = a;
                 sum += a;
             }
+            if (!(sum > 0.0)) {
+                throw zeroNormalizer(t);
+            }
             d[t] = sum;
             for (int j = 0; j < k; j++) {
                 alpha[t][j] /= sum;
             }
         }
         return new Forward(alpha, d, m);
+    }
+
+    private static IllegalArgumentException zeroNormalizer(int t) {
+        return new IllegalArgumentException("forward normalizer is zero at t=" + t
+                + ": the observation has zero likelihood under every reachable state"
+                + " (parameters and data are incompatible)");
     }
 
     /** Fills {@code m} with per-row maxima and returns {@code exp(logb - m)}. */
@@ -322,8 +491,7 @@ public final class GaussianHmm {
      * @return {@code log p(x_1..x_T)}
      */
     public double score(double[][] x) {
-        HmmParams p = requireFitted();
-        x = validate(x);
+        HmmParams p = prepare(x);
         Forward f = forward(logEmissions(x, p), p);
         return logLik(f.d, f.m);
     }
@@ -340,8 +508,7 @@ public final class GaussianHmm {
      * @return filtered probability rows
      */
     public double[][] filteredProbabilities(double[][] x) {
-        HmmParams p = requireFitted();
-        x = validate(x);
+        HmmParams p = prepare(x);
         return forward(logEmissions(x, p), p).alpha;
     }
 
@@ -357,8 +524,7 @@ public final class GaussianHmm {
      * @return smoothed probability rows (each sums to 1)
      */
     public double[][] smoothedProbabilities(double[][] x) {
-        HmmParams p = requireFitted();
-        x = validate(x);
+        HmmParams p = prepare(x);
         double[][] logb = logEmissions(x, p);
         Forward f = forward(logb, p);
         double[][] beta = backward(logb, p, f.d, f.m);
@@ -386,8 +552,7 @@ public final class GaussianHmm {
      * @return state indices per day
      */
     public int[] viterbi(double[][] x) {
-        HmmParams p = requireFitted();
-        x = validate(x);
+        HmmParams p = prepare(x);
         double[][] logb = logEmissions(x, p);
         int t2 = logb.length;
         int k = logb[0].length;
@@ -457,10 +622,18 @@ public final class GaussianHmm {
      * @param tol convergence tolerance on {@code max|pi_new - pi|}
      * @param maxIterations iteration cap
      * @return probability vector with {@code pi A = pi}
+     * @throws IllegalArgumentException if unfitted, {@code tol <= 0},
+     *     {@code maxIterations < 1}, or the iteration does not converge within
+     *     the cap (periodic or reducible chain) — an unconverged vector is
+     *     never returned as stationary
      */
     public double[] stationaryDistribution(double tol, int maxIterations) {
         HmmParams p = requireFitted();
         int k = nStates;
+        validateParams(p, k, p.means[0].length);
+        if (!(tol > 0.0) || maxIterations < 1) {
+            throw new IllegalArgumentException("stationary_distribution: tol must be > 0 and max_iter >= 1");
+        }
         double[] pi = new double[k];
         Arrays.fill(pi, 1.0 / k);
         for (int it = 0; it < maxIterations; it++) {
@@ -486,7 +659,8 @@ public final class GaussianHmm {
             }
             pi = nxt;
         }
-        return pi;
+        throw new IllegalArgumentException("stationary distribution did not converge in " + maxIterations
+                + " power-method iterations (periodic or reducible transition matrix)");
     }
 
     /**
@@ -571,8 +745,13 @@ public final class GaussianHmm {
      * @param x observations, T x D with T &gt; K
      * @param init optional warm-start parameters (used by the walk-forward
      *     refit schedule); null selects {@link #pinnedInit}
-     * @return the fit result
-     * @throws IllegalArgumentException on invalid observations or T &lt;= K
+     * @return the fit result; a dead state or a monotonicity violation is
+     *     reported through {@code deadState} / {@code monotone} with
+     *     {@code converged = false}, never as an exception
+     * @throws IllegalArgumentException on invalid observations, T &lt;= K, a
+     *     warm start whose shapes/stochasticity disagree with (K, D)
+     *     (API_SPEC 1.9), or an observation with zero likelihood under every
+     *     reachable state
      */
     public HmmFitResult fit(double[][] x, HmmParams init) {
         x = validate(x);
@@ -581,14 +760,20 @@ public final class GaussianHmm {
             throw new IllegalArgumentException(
                     "need more observations than states: T=" + t2 + ", K=" + nStates);
         }
-        HmmParams p = init != null ? init.copy() : pinnedInit(x);
         int k = nStates;
         int d = x[0].length;
+        if (init != null) {
+            validateParams(init, k, d);
+        }
+        HmmParams p = init != null ? init.copy() : pinnedInit(x);
 
         double[] history = new double[maxIter];
         double llPrev = Double.NEGATIVE_INFINITY;
         double ll = Double.NEGATIVE_INFINITY;
         boolean converged = false;
+        boolean monotone = true;
+        int deadState = -1;
+        boolean exhausted = true;
         int nIter = 0;
         for (int it = 0; it < maxIter; it++) {
             // E-step: scores the CURRENT parameters, so on convergence the
@@ -596,11 +781,23 @@ public final class GaussianHmm {
             double[][] logb = logEmissions(x, p);
             Forward f = forward(logb, p);
             ll = logLik(f.d, f.m);
+            if (!Double.isFinite(ll)) { // unreachable after the d_t > 0 guard; hard stop
+                throw new IllegalArgumentException("EM produced a non-finite log-likelihood");
+            }
             history[nIter] = ll;
             nIter++;
-            if (nIter > 1 && ll - llPrev < tol) {
-                converged = true;
-                break;
+            if (nIter > 1) {
+                EmStep status = emStepStatus(ll, llPrev, tol);
+                if (status == EmStep.NON_MONOTONE) {
+                    monotone = false;
+                    exhausted = false;
+                    break;
+                }
+                if (status == EmStep.CONVERGED) {
+                    converged = true;
+                    exhausted = false;
+                    break;
+                }
             }
             llPrev = ll;
             double[][] beta = backward(logb, p, f.d, f.m);
@@ -610,6 +807,29 @@ public final class GaussianHmm {
                 for (int i = 0; i < k; i++) {
                     gamma[t][i] = alpha[t][i] * beta[t][i];
                 }
+            }
+
+            // Dead-state guard (pinned): a state without posterior support
+            // cannot be re-estimated; stop with the just-scored parameters.
+            double[] gsum = new double[k];
+            double[] gsumTrans = new double[k];
+            for (int t = 0; t < t2; t++) {
+                for (int i = 0; i < k; i++) {
+                    gsum[i] += gamma[t][i];
+                    if (t < t2 - 1) {
+                        gsumTrans[i] += gamma[t][i];
+                    }
+                }
+            }
+            for (int i = 0; i < k; i++) {
+                if (gsumTrans[i] < DEAD_STATE_SUPPORT) {
+                    deadState = i;
+                    break;
+                }
+            }
+            if (deadState >= 0) {
+                exhausted = false;
+                break;
             }
 
             // xi summed over t: xi_sum(i,j) = A_ij * sum_t alpha_t(i) *
@@ -631,16 +851,6 @@ public final class GaussianHmm {
             }
 
             // M-step.
-            double[] gsum = new double[k];
-            double[] gsumTrans = new double[k];
-            for (int t = 0; t < t2; t++) {
-                for (int i = 0; i < k; i++) {
-                    gsum[i] += gamma[t][i];
-                    if (t < t2 - 1) {
-                        gsumTrans[i] += gamma[t][i];
-                    }
-                }
-            }
             p.startprob = gamma[0].clone();
             double[][] newA = new double[k][k];
             for (int i = 0; i < k; i++) {
@@ -679,7 +889,7 @@ public final class GaussianHmm {
             p.means = newMeans;
             p.variances = newVars;
         }
-        if (!converged) {
+        if (exhausted) {
             // maxIter exhausted: params had one more M-step than the last
             // recorded E-step, so score them once for a consistent report.
             Forward f = forward(logEmissions(x, p), p);
@@ -706,7 +916,8 @@ public final class GaussianHmm {
             }
         }
         this.params = new HmmParams(sp, a2, mu2, v2);
-        this.fitResult = new HmmFitResult(ll, nIter, converged, Arrays.copyOf(history, nIter));
+        this.fitResult = new HmmFitResult(ll, nIter, converged, Arrays.copyOf(history, nIter),
+                monotone, deadState);
         return fitResult;
     }
 
@@ -722,14 +933,47 @@ public final class GaussianHmm {
      * step of the batch forward pass; used by the regime gate between refits
      * so the filter never re-reads the past.
      *
-     * @param p current HMM parameters
-     * @param alphaPrev filtered probabilities at t-1, length K
+     * @param p current HMM parameters (validated; K from startprob, D from means)
+     * @param alphaPrev filtered probabilities at t-1, length K, non-negative,
+     *     summing to 1 within {@link #STOCHASTIC_TOL}
      * @param xt new observation, length D
      * @return filtered probabilities at t, length K
+     * @throws IllegalArgumentException on invalid parameters, a length
+     *     mismatch, non-finite input, or an observation with zero likelihood
+     *     under every reachable state
      */
     public static double[] forwardStep(HmmParams p, double[] alphaPrev, double[] xt) {
-        int k = p.means.length;
-        int d = xt.length;
+        if (p == null || p.startprob == null || p.means == null || p.means.length == 0
+                || p.means[0] == null) {
+            throw new IllegalArgumentException("parameter set is null");
+        }
+        int k = p.startprob.length;
+        int d = p.means[0].length;
+        validateParams(p, k, d);
+        if (alphaPrev == null || alphaPrev.length != k) {
+            throw new IllegalArgumentException("alpha_prev length "
+                    + (alphaPrev == null ? "null" : String.valueOf(alphaPrev.length))
+                    + " does not match n_states=" + k);
+        }
+        double asum = 0.0;
+        for (double v : alphaPrev) {
+            if (!Double.isFinite(v) || v < 0.0) {
+                throw new IllegalArgumentException("alpha_prev must be finite, non-negative and sum to 1");
+            }
+            asum += v;
+        }
+        if (Math.abs(asum - 1.0) > STOCHASTIC_TOL) {
+            throw new IllegalArgumentException("alpha_prev must be finite, non-negative and sum to 1");
+        }
+        if (xt == null || xt.length != d) {
+            throw new IllegalArgumentException("observation length "
+                    + (xt == null ? "null" : String.valueOf(xt.length)) + " does not match D=" + d);
+        }
+        for (double v : xt) {
+            if (!Double.isFinite(v)) {
+                throw new IllegalArgumentException("observation contains NaN or inf");
+            }
+        }
         double[] logb = new double[k];
         double mx = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < k; i++) {
@@ -751,6 +995,10 @@ public final class GaussianHmm {
             }
             a[j] = dot * Math.exp(logb[j] - mx);
             sum += a[j];
+        }
+        if (!(sum > 0.0)) {
+            throw new IllegalArgumentException(
+                    "forward step: the observation has zero likelihood under every reachable state");
         }
         for (int j = 0; j < k; j++) {
             a[j] /= sum;

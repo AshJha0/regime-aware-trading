@@ -16,12 +16,27 @@ use crate::matrix::Matrix;
 /// Trading days per year (pinned).
 pub const TRADING_DAYS: f64 = 252.0;
 
-fn validate_returns(r: &Matrix, name: &str) -> Result<()> {
+/// Non-empty, all finite.  With `simple_returns` (pinned, API_SPEC.md §3)
+/// every entry must also be `> -1`: a -100 % (or worse) day is corrupt data
+/// and would make every trailing growth ratio `0/0`.
+fn validate_returns(r: &Matrix, name: &str, simple_returns: bool) -> Result<()> {
     if r.rows() == 0 || r.cols() == 0 {
         return Err(RegimeError::InvalidInput(format!("{name} must be a non-empty matrix")));
     }
     if !r.all_finite() {
         return Err(RegimeError::InvalidInput(format!("{name} contain NaN or inf")));
+    }
+    if simple_returns {
+        for t in 0..r.rows() {
+            for a in 0..r.cols() {
+                if r.get(t, a) <= -1.0 {
+                    return Err(RegimeError::InvalidInput(format!(
+                        "{name} contain a return <= -100% at t={t}, asset={a} ({})",
+                        r.get(t, a)
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -41,7 +56,7 @@ fn validate_returns(r: &Matrix, name: &str) -> Result<()> {
 /// # Errors
 /// Invalid returns, `lam` outside `(0, 1)`, or `init_window` outside `[1, T]`.
 pub fn ewma_variance(returns: &Matrix, lam: f64, init_window: usize) -> Result<Matrix> {
-    validate_returns(returns, "returns")?;
+    validate_returns(returns, "returns", true)?;
     let (t_len, n_assets) = (returns.rows(), returns.cols());
     if !(lam > 0.0 && lam < 1.0) {
         return Err(RegimeError::InvalidInput(format!("ewma lambda must be in (0, 1), got {lam}")));
@@ -88,7 +103,7 @@ pub fn momentum_positions(
     ewma_lambda: f64,
     leverage_cap: f64,
 ) -> Result<Matrix> {
-    validate_returns(returns, "returns")?;
+    validate_returns(returns, "returns", true)?;
     let (t_len, n_assets) = (returns.rows(), returns.cols());
     if lookback < 1 {
         return Err(RegimeError::InvalidInput(format!("lookback must be >= 1, got {lookback}")));
@@ -158,7 +173,7 @@ pub fn carry_positions(
     bottom_n: usize,
     rebalance_days: usize,
 ) -> Result<Matrix> {
-    validate_returns(rate_diffs, "rate differentials")?;
+    validate_returns(rate_diffs, "rate differentials", false)?;
     let (t_len, n_assets) = (rate_diffs.rows(), rate_diffs.cols());
     if top_n < 1 || bottom_n < 1 || top_n + bottom_n > n_assets {
         return Err(RegimeError::InvalidInput(format!(
@@ -207,8 +222,8 @@ pub fn carry_positions(
 /// # Errors
 /// Shape mismatch or invalid input.
 pub fn carry_total_returns(spot_returns: &Matrix, rate_diffs: &Matrix) -> Result<Matrix> {
-    validate_returns(spot_returns, "spot returns")?;
-    validate_returns(rate_diffs, "rate differentials")?;
+    validate_returns(spot_returns, "spot returns", true)?;
+    validate_returns(rate_diffs, "rate differentials", false)?;
     if spot_returns.rows() != rate_diffs.rows() || spot_returns.cols() != rate_diffs.cols() {
         return Err(RegimeError::InvalidInput(
             "spot returns and differentials must have equal shape".into(),
@@ -246,7 +261,9 @@ pub fn carry_total_returns(spot_returns: &Matrix, rate_diffs: &Matrix) -> Result
 ///
 /// # Errors
 /// Series shorter than `train_min_days`, `train_min_days <= n_states`,
-/// `refit_days < 1`, unknown `mode`, or non-finite input.
+/// `refit_days < 1`, unknown `mode`, `threshold` outside `[0, 1]`, invalid
+/// HMM settings (`n_states < 2`, ...), non-finite input, or a failing refit
+/// (the message then names the refit day `t`).
 #[allow(clippy::too_many_arguments)]
 pub fn regime_gate(
     index_returns: &[f64],
@@ -267,6 +284,13 @@ pub fn regime_gate(
             "gate mode must be 'prob' or 'binary', got {mode:?}"
         )));
     }
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(RegimeError::InvalidInput(format!(
+            "gate threshold must be in [0, 1], got {threshold}"
+        )));
+    }
+    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
+    GaussianHmm::new(n_states, tol, max_iter, var_floor)?;
     let t_total = index_returns.len();
     if train_min_days <= n_states || refit_days < 1 {
         return Err(RegimeError::InvalidInput(
@@ -289,16 +313,23 @@ pub fn regime_gate(
         if (t - t0) % refit_days == 0 {
             let mut model = GaussianHmm::new(n_states, tol, max_iter, var_floor)?;
             let warm = models.last().and_then(|m| m.params()).cloned();
-            let window = full.head(t + 1);
-            model.fit(&window, warm.as_ref())?;
+            let window = full.head(t + 1)?;
+            let refit = |model: &mut GaussianHmm| -> Result<Vec<f64>> {
+                model.fit(&window, warm.as_ref())?;
+                let filtered = model.filtered_probabilities(&window)?;
+                Ok(filtered.row(t).to_vec())
+            };
+            alpha = refit(&mut model).map_err(|e| {
+                RegimeError::InvalidInput(format!("regime_gate refit at t={t}: {e}"))
+            })?;
             let params = model.params().expect("fit just succeeded");
             calm_state = argmin_variance(params);
-            let filtered = model.filtered_probabilities(&window)?;
-            alpha = filtered.row(t).to_vec();
             models.push(model);
         } else {
             let params = models.last().and_then(|m| m.params()).expect("model fitted");
-            alpha = forward_step(params, &alpha, &[index_returns[t]]);
+            alpha = forward_step(params, &alpha, &[index_returns[t]]).map_err(|e| {
+                RegimeError::InvalidInput(format!("regime_gate forward step at t={t}: {e}"))
+            })?;
         }
         let p_calm = alpha[calm_state];
         gate[t] = if mode == "prob" {
@@ -332,7 +363,7 @@ fn argmin_variance(params: &crate::hmm::HmmParams) -> usize {
 /// # Errors
 /// Length mismatch or non-finite gate values.
 pub fn apply_gate(positions: &Matrix, gate: &[f64]) -> Result<Matrix> {
-    validate_returns(positions, "positions")?;
+    validate_returns(positions, "positions", false)?;
     if gate.len() != positions.rows() {
         return Err(RegimeError::InvalidInput(format!(
             "gate length {} does not match positions rows {}",

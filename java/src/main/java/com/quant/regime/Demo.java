@@ -7,8 +7,8 @@ import java.util.Locale;
 /**
  * End-to-end demo: regime detection + regime-aware momentum and carry.
  *
- * <p>Run from {@code java/} after {@code ./build.sh}:
- * {@code ./demo.sh} (optionally passing an alternative data directory).
+ * <p>Run from {@code java/} after {@code bash build.sh}:
+ * {@code bash demo.sh} (optionally passing an alternative data directory).
  * Prints the fitted regime table, Viterbi-vs-true accuracy, the strategy
  * comparison (filtered vs unfiltered) and the crisis-state breakdown.
  */
@@ -30,7 +30,7 @@ public final class Demo {
         System.out.println(LINE);
         Pipeline.Result pipe = Pipeline.runFullPipeline(dataDir);
         Pipeline.Dataset ds = pipe.dataset();
-        int k = pipe.config().nStates();
+        int k = pipe.hmm3().nStates(); // the K=3 tables are keyed to the full-sample fit
         double[] r = ds.indexReturns();
 
         System.out.printf("Data: %d trading days, %s .. %s%n", r.length,

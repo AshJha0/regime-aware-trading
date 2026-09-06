@@ -162,3 +162,116 @@ fn property_costs_never_help() {
         prev = total;
     }
 }
+
+// ------------------------------------------------------------------------- //
+// Robustness: wipe-outs, dates, degenerate shapes
+// ------------------------------------------------------------------------- //
+
+#[test]
+fn backtest_wipeout_is_error() {
+    // PT-5: 4x leverage into a -30% day is a -120% net day -> error naming t.
+    let p = Matrix::column(&[4.0, 4.0, 4.0]);
+    let r = Matrix::column(&[0.0, -0.3, 0.1]);
+    let err = run_backtest(&p, &r, 0.0, None).unwrap_err();
+    assert!(err.to_string().contains("wiped out on day t=1"), "{err}");
+    assert!(compute_metrics(&[0.01, -1.0, 0.02], None).is_err());
+    // exactly -100% net on day 0 via costs alone is a wipe-out too
+    let err = run_backtest(&Matrix::filled(1, 1, 1.0), &Matrix::zeros(1, 1), 1e4, None).unwrap_err();
+    assert!(err.to_string().contains("t=0"));
+    // invariant on accepted input: max_dd >= -1 and equity > 0
+    let res = run_backtest(&p, &Matrix::column(&[0.0, -0.2, 0.1]), 0.0, None).unwrap();
+    assert!(res.metrics.max_dd >= -1.0);
+    assert!(res.equity.iter().all(|&e| e > 0.0));
+    assert!((res.equity[1] - 0.2).abs() < 1e-15);
+}
+
+#[test]
+fn backtest_rejects_returns_below_minus_one() {
+    let p = Matrix::filled(3, 1, 1.0);
+    for bad in [-1.0, -1.5] {
+        let r = Matrix::column(&[0.0, bad, 0.0]);
+        let err = run_backtest(&p, &r, 0.0, None).unwrap_err();
+        assert!(err.to_string().contains("<= -100%"), "{err}");
+    }
+}
+
+#[test]
+fn compute_metrics_dates_length_mismatch() {
+    // PT-7: the public metrics function validates dates itself.
+    let three = [
+        Date::new(2020, 1, 1).unwrap(),
+        Date::new(2020, 1, 2).unwrap(),
+        Date::new(2020, 1, 3).unwrap(),
+    ];
+    assert!(compute_metrics(&[0.0; 5], Some(&three)).is_err());
+    assert!(run_backtest(&Matrix::filled(5, 1, 1.0), &Matrix::zeros(5, 1), 0.0, Some(&three)).is_err());
+}
+
+#[test]
+fn dates_must_be_strictly_increasing() {
+    // PT-8 / MAJ-6: duplicated, out-of-order or malformed dates are rejected.
+    let p = Matrix::filled(3, 1, 1.0);
+    let r = Matrix::zeros(3, 1);
+    let dup = [
+        Date::new(2020, 1, 2).unwrap(),
+        Date::new(2020, 1, 2).unwrap(),
+        Date::new(2020, 1, 3).unwrap(),
+    ];
+    let unsorted = [
+        Date::new(2020, 2, 3).unwrap(),
+        Date::new(2020, 1, 2).unwrap(),
+        Date::new(2020, 1, 3).unwrap(),
+    ];
+    let malformed = [
+        Date { year: 2020, month: 13, day: 1 },
+        Date { year: 2020, month: 13, day: 2 },
+        Date { year: 2020, month: 13, day: 3 },
+    ];
+    for dates in [&dup, &unsorted, &malformed] {
+        let err = run_backtest(&p, &r, 0.0, Some(dates)).unwrap_err();
+        assert!(matches!(err, regime::RegimeError::InvalidInput(_)), "{err}");
+        assert!(compute_metrics(&[0.0; 3], Some(dates)).is_err());
+    }
+    assert!(Date::parse("2020-1-5").is_err());
+    assert!(Date::parse("2020-13-01").is_err());
+    assert!(Date::parse("2020-01-32").is_err());
+    assert_eq!(Date::parse("2020-01-05").unwrap(), Date::new(2020, 1, 5).unwrap());
+    // sorted but non-contiguous months: pinned "contiguous runs" == calendar months
+    let dates = [
+        Date::new(2020, 1, 2).unwrap(),
+        Date::new(2020, 1, 31).unwrap(),
+        Date::new(2020, 3, 2).unwrap(),
+    ];
+    let m = compute_metrics(&[-0.01, -0.02, 0.05], Some(&dates)).unwrap();
+    assert!((m.worst_month - (0.99 * 0.98 - 1.0)).abs() < 1e-15);
+}
+
+#[test]
+fn backtest_rejects_zero_assets() {
+    // MAJ-7: A = 0 columns is an error in every language.
+    let err = run_backtest(&Matrix::zeros(3, 0), &Matrix::zeros(3, 0), 0.0, None).unwrap_err();
+    assert!(err.to_string().contains("no assets"), "{err}");
+}
+
+#[test]
+fn max_drawdown_requires_positive_equity() {
+    assert!(max_drawdown(&[1.0, 0.0, 0.5]).is_err());
+    assert!(max_drawdown(&[1.0, -0.2]).is_err());
+    assert!(max_drawdown(&[1.0, f64::INFINITY]).is_err());
+}
+
+#[test]
+fn state_conditional_returns_validation() {
+    // MIN-13: labels outside [0, K) and K < 1 are errors, never dropped.
+    let net = [0.0; 4];
+    assert!(state_conditional_returns(&net, &[0, 1, 2, 3], 3).is_err());
+    assert!(state_conditional_returns(&net, &[0, 0, 0, 0], 0).is_err());
+    assert!(state_conditional_returns(&[0.0, f64::NAN, 0.0, 0.0], &[0, 0, 0, 0], 1).is_err());
+}
+
+#[test]
+fn worst_month_block_fallback_short_series() {
+    // PT-11 complement: fewer than 21 days -> one block covering everything.
+    let m = compute_metrics(&[-0.01; 5], None).unwrap();
+    assert!((m.worst_month - (0.99f64.powi(5) - 1.0)).abs() < 1e-15);
+}

@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
             kLine);
         regime::PipelineResult pipe = regime::run_full_pipeline(data_dir);
         const auto& ds = pipe.dataset;
-        const int K = pipe.config.n_states;
+        const int K = pipe.hmm3.n_states();  // the K=3 tables are keyed to the full-sample fit
         const regime::Matrix r = regime::to_matrix(ds.index_returns);
 
         // ---------------- model selection ---------------- //

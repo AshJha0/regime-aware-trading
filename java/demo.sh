@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the end-to-end demo (build.sh first). Must be run from java/.
+# Run the end-to-end demo (bash demo.sh from java/, after bash build.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
 

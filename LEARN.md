@@ -259,7 +259,24 @@ Each iteration provably does not decrease the log-likelihood (Jensen's
 inequality on the EM lower bound); `test_em_monotonic_on_bundled_data`
 asserts it numerically. Convergence is declared when the improvement drops
 below $10^{-8}$; on the bundled index, K=2 converges in 27 E-steps and K=3
-in 63.
+in 63. Because the guarantee is a theorem, the implementation treats a
+*decrease* larger than $10^{-6}\max(1, |\log L|)$ as a numerical fault:
+EM stops and reports `converged = False, monotone = False` rather than
+mistaking the tiny "improvement" for convergence (pinned in API_SPEC 1.4).
+
+**Dead states.** Every M-step denominator is a posterior mass
+$\sum_t \gamma_t(i)$. A state whose emission underflows to zero at every
+$t$ — e.g. a warm start that parks a state at mean 5.0 with variance
+$10^{-8}$ over data of size $10^{-2}$ — has zero mass, and the textbook
+update returns $0/0$. Rabiner (1989, §V.B) discusses the collapse and
+recommends floors; Bilmes (1998, §4) writes the update assuming positive
+mass. The pinned rule here is detection rather than re-seeding: after
+each E-step the transition-row support $\sum_{t<T}\gamma_t(i)$ is
+compared with $10^{-12}$, and if any state is below it EM stops *before*
+the M-step with the just-scored (finite) parameters, `converged = False`
+and `dead_state = i`. Nothing is ever NaN, the reported log-likelihood is
+exactly the score of the returned parameters, and a walk-forward refit
+keeps going with the flagged model (COOKBOOK recipe 14 shows it).
 
 ### 4.2 Local optima and initialization
 
@@ -282,12 +299,16 @@ choices in this toolkit deal with that:
 
 Failure modes to know: a state can collapse onto a handful of points
 (variance $\to 0$, likelihood $\to \infty$ — the classic Gaussian-mixture
-degeneracy), which the variance floor prevents; and with more states than
+degeneracy), which the variance floor prevents; with more states than
 the data supports, EM parks surplus states on near-duplicates (again the
-floor engages — tested via `test_variance_floor_engages`). Non-convergence
-after 500 iterations is reported as a flag on the result, never an
-exception: a nearly converged model is still usable, and walk-forward
-loops must not die mid-backtest.
+floor engages — tested via `test_variance_floor_engages`); and a state can
+lose all posterior support (the dead state above), which is detected and
+flagged. Non-convergence after 500 iterations, a dead state and a
+non-monotone step are all reported as flags on the result, never as
+exceptions: a nearly converged model is still usable, and walk-forward
+loops must not die mid-backtest. Genuinely impossible input — a
+parameter set whose shapes disagree with the data, or an observation
+with zero likelihood under every reachable state — *is* an error.
 
 ### 4.3 What EM found on the bundled data (golden values)
 
@@ -419,11 +440,28 @@ $1/\hat\sigma$ equalizes risk across assets and time. (ii) Because
 volatility is persistent and negatively related to returns, deleveraging
 into rising vol is itself a (mild) source of Sharpe improvement. The 4x
 cap prevents grotesque leverage when the vol estimate goes tiny. Zero
-estimated vol gets the cap (pinned edge case).
+estimated vol gets the cap (pinned edge case). Returns must be simple
+daily returns above $-100\%$: a $-1$ print would zero the running growth
+product and turn every later trailing ratio into $0/0$, so it is rejected
+as corrupt data rather than traded.
+
+**Where this deliberately departs from Moskowitz, Ooi & Pedersen
+(2012).** MOP use a 12-month (~252-day) return signal, a 40% annualized
+vol target, an EWMA with a 60-day centre of mass and no leverage cap, and
+size each market independently. The pinned configuration here keeps the
+252-day signal but targets 10% per asset, uses the RiskMetrics
+$\lambda = 0.94$ EWMA (about 16 days of memory) seeded with the first
+window's mean squared return, caps leverage at 4x, and divides by the
+asset count so the *book* is equal-risk-budgeted. These are configuration
+choices made for a readable teaching study, not a replication of the
+paper's numbers.
 
 On the bundled data, unfiltered momentum earns +3.38% ann. at 4.14% vol
 (Sharpe 0.81, maxDD $-10.5\%$) — but $-8.77\%$ annualized inside the
-decoded crisis state (a golden sign case).
+decoded crisis state (a golden sign case). All such numbers are
+full-sample: the first 251 days carry no momentum position at all, which
+understates the from-first-trade Sharpe by roughly
+$1/\sqrt{1 - 251/2000} \approx 6.5\%$ relative.
 
 ---
 
@@ -470,8 +508,20 @@ by ascending asset index (pinned so all languages agree). Long the top 3
 at $+1/3$ each, short the bottom 3 at $-1/3$ each; hold in between. Traded
 return on day $t$ is $\text{spot}_t + \text{diff}_{t-1}/252$ — the
 differential accrued is the one *set at the previous close* (known in
-advance; day 0 accrues nothing). Result: +10.77% ann., Sharpe 1.58, maxDD
-$-10.0\%$ unfiltered.
+advance; day 0 accrues nothing) — a simple-interest approximation with no
+forward points and no compounding. Result: +10.77% ann., Sharpe 1.58,
+maxDD $-10.0\%$ unfiltered.
+
+**Be honest about what the bundled data exercise.** The generator's
+differentials are Ornstein-Uhlenbeck around bases that sit at least 1.5
+percentage points apart with noise of 0.0004 per day, so in 2000 days the
+six differentials *never change rank order*: the basket built on day 0 is
+held for the whole sample, and the golden `turnover_carry` is exactly
+$2/2000$. The 21-day rebalance and the ranking tie-break are real and
+pinned, but on this data they never move the book; they are exercised
+and golden-pinned instead by the synthetic `carry_rerank_*` panel
+(API_SPEC 5), whose ranks cross at day 10, re-rank at day 21 and tie at
+day 42.
 
 **Market-convention note (equity vs FX).** Equity regimes are usually
 detected on index returns (as here); FX carry practitioners watch rate
@@ -509,7 +559,11 @@ trades more smoothly and avoids threshold-flapping turnover.
 
 ### 9.2 What filtering does — and what it costs
 
-Golden results on the bundled data (5 bps costs):
+Golden results on the bundled data (5 bps costs; full sample of 2000
+days, which includes 251 flat momentum days before the first lookback
+window and 503 gate = 1 days before the first walk-forward fit; Sharpe
+is raw, i.e. no risk-free rate is subtracted and volatility is the
+population estimate):
 
 | strategy | ann ret | Sharpe | maxDD |
 |---|---|---|---|
@@ -607,8 +661,21 @@ re-read the past under future parameters.
   Section 3.2. Never implement the textbook unscaled recursion for
   $T > \sim 100$.
 * **Dividing by $\sum_t \gamma_t(i) \approx 0$** for a dead state — the
-  variance floor plus quantile initialization keep states alive here; in
-  general, guard the M-step denominators.
+  quantile initialization keeps states alive from a cold start, but a
+  warm start can kill one; the pinned guard (Section 4.1) checks the
+  support after every E-step and stops with a flag instead of producing
+  NaN parameters that only surface days later as a NaN gate.
+* **Leveraged accounting past $-100\%$.** `equity = prod(1 + net)` is
+  linear in returns, so a 4x book on a $-30\%$ day produces a $-120\%$
+  net return, negative equity and a "drawdown" below $-100\%$. The engine
+  refuses such a day (an error naming $t$) rather than compounding a
+  book that no longer exists; likewise a raw return $\le -1$ is rejected
+  as corrupt input.
+* **Shape drift between a model and its data.** Scoring $D=2$ data with a
+  $D=1$ model, or warm-starting $K=3$ from $K=2$ parameters, must be an
+  error — a vectorized reference can otherwise broadcast its way to a
+  finite, wrong number. Every entry point validates $K$, $D$, finiteness
+  and stochasticity (API_SPEC 1.9).
 * **$\log 0$ in Viterbi** when $A_{ij} = 0$: fine in log-space max
   ($-\infty$ never wins), fatal if you exponentiate.
 * **Comparing likelihoods across different scalings.** $\log L$ must be
@@ -624,8 +691,10 @@ re-read the past under future parameters.
   break low. Undefined tie-breaks are the classic source of
   cross-language flakiness.
 * **Calendar vs block months.** `worst_month` uses calendar months when
-  dates exist and 21-day blocks otherwise — mixing the two changes the
-  metric.
+  dates exist and 21-day blocks (trailing partial block dropped) otherwise
+  — mixing the two changes the metric. Dates must be strictly increasing;
+  a duplicated or out-of-order row is rejected because the four ports
+  would otherwise silently disagree on which days share a month.
 
 ---
 
@@ -686,7 +755,8 @@ correlated with everything else (the steamroller). Carry is short a
 volatility/liquidity option; its arithmetic Sharpe hides negative skew.
 
 **Q8. Your regime filter improved Sharpe but lowered total return. Is it
-worth running?**
+worth running?** (Sharpe here is the raw ratio; with a risk-free rate the
+comparison shifts slightly but the ordering does not.)
 Depends on the binding constraint. If capital is constrained and leverage
 free, higher Sharpe can be re-levered to dominate outright. If leverage is
 capped, you are explicitly paying return for smaller drawdowns — often
@@ -717,7 +787,12 @@ data's distinct-value support without crashing.
 
 * **L. Rabiner (1989)**, "A Tutorial on Hidden Markov Models and Selected
   Applications in Speech Recognition," *Proc. IEEE* — the canonical HMM
-  tutorial; the scaling scheme here is his.
+  tutorial; the scaling scheme here is his, and §V.B is the source of the
+  zero-mass discussion behind the dead-state guard.
+* **J. Bilmes (1998)**, "A Gentle Tutorial of the EM Algorithm and its
+  Application to Parameter Estimation for Gaussian Mixture and Hidden
+  Markov Models," ICSI TR-97-021 — the Gaussian-emission M-step in the
+  exact form implemented here.
 * **C. Bishop (2006)**, *Pattern Recognition and Machine Learning*,
   ch. 13 — HMMs and EM with modern notation.
 * **J. Hamilton (1989)**, "A New Approach to the Economic Analysis of
@@ -737,3 +812,6 @@ data's distinct-value support without crashing.
   volatility convention.
 * **M. López de Prado (2018)**, *Advances in Financial Machine Learning* —
   backtest hygiene, lookahead and selection bias.
+
+Full citations with DOIs are collected in the README's References
+section.

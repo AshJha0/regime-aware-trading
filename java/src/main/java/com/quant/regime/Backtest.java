@@ -69,16 +69,53 @@ public final class Backtest {
     public record StateStats(int nDays, double annReturn, double annVol, double sharpe) {
     }
 
+    /** Pinned net-return checks: non-empty, finite, and &gt; -1 (wipe-out; API_SPEC 2). */
+    private static void validateNet(double[] net) {
+        if (net == null || net.length == 0) {
+            throw new IllegalArgumentException("net return series is empty");
+        }
+        for (int t = 0; t < net.length; t++) {
+            if (!Double.isFinite(net[t])) {
+                throw new IllegalArgumentException("net returns contain NaN or inf");
+            }
+            if (net[t] <= -1.0) {
+                throw new IllegalArgumentException(
+                        "equity wiped out on day t=" + t + ": net return " + net[t] + " <= -100%");
+            }
+        }
+    }
+
+    /** Pinned date checks (API_SPEC 2.1): length T, non-null, strictly increasing. */
+    private static void validateDates(LocalDate[] dates, int t2) {
+        if (dates.length != t2) {
+            throw new IllegalArgumentException(
+                    "dates length " + dates.length + " does not match number of days " + t2);
+        }
+        for (int t = 0; t < t2; t++) {
+            if (dates[t] == null) {
+                throw new IllegalArgumentException("dates could not be parsed: null at t=" + t);
+            }
+            if (t > 0 && !dates[t - 1].isBefore(dates[t])) {
+                throw new IllegalArgumentException("dates must be strictly increasing (at t=" + t + ")");
+            }
+        }
+    }
+
     /**
      * Maximum drawdown of an equity curve, as a non-positive fraction.
      *
-     * @param equity equity curve, length &gt;= 1
+     * @param equity equity curve, length &gt;= 1, finite and strictly positive
      * @return {@code min_t (equity[t] / cummax(equity)[t] - 1)}
-     * @throws IllegalArgumentException on an empty curve
+     * @throws IllegalArgumentException on an empty, non-finite or non-positive curve
      */
     public static double maxDrawdown(double[] equity) {
         if (equity == null || equity.length == 0) {
             throw new IllegalArgumentException("equity curve is empty");
+        }
+        for (double e : equity) {
+            if (!Double.isFinite(e) || e <= 0.0) {
+                throw new IllegalArgumentException("equity curve must be finite and strictly positive");
+            }
         }
         double peak = Double.NEGATIVE_INFINITY;
         double mdd = Double.POSITIVE_INFINITY;
@@ -92,23 +129,19 @@ public final class Backtest {
     /**
      * Pinned summary metrics from a daily net-return series.
      *
-     * @param net daily net returns, length T
-     * @param dates optional dates (length T) for the worst-calendar-month
-     *     metric; null falls back to consecutive 21-day blocks
+     * @param net daily net returns, length T (finite, each &gt; -1)
+     * @param dates optional dates (length T, strictly increasing) for the
+     *     worst-calendar-month metric; null falls back to consecutive 21-day
+     *     blocks (trailing partial block dropped — pinned, API_SPEC 2.1)
      * @return the metrics
-     * @throws IllegalArgumentException on empty or non-finite input
+     * @throws IllegalArgumentException on empty/non-finite input, a net return
+     *     &lt;= -1 (wipe-out), or dates that are the wrong length, null, or
+     *     not strictly increasing
      */
     public static Metrics computeMetrics(double[] net, LocalDate[] dates) {
-        if (net == null || net.length == 0) {
-            throw new IllegalArgumentException("net return series is empty");
-        }
-        for (double v : net) {
-            if (!Double.isFinite(v)) {
-                throw new IllegalArgumentException("net returns contain NaN or inf");
-            }
-        }
-        if (dates != null && dates.length != net.length) {
-            throw new IllegalArgumentException("dates length does not match number of days");
+        validateNet(net);
+        if (dates != null) {
+            validateDates(dates, net.length);
         }
         int t2 = net.length;
         double mean = 0.0;
@@ -175,8 +208,10 @@ public final class Backtest {
      * @param costBps one-way transaction cost in basis points of turnover
      * @param dates optional dates (length T) for calendar-month metrics
      * @return the backtest result
-     * @throws IllegalArgumentException on shape mismatch, non-finite input,
-     *     empty input, or negative cost
+     * @throws IllegalArgumentException on shape mismatch, empty input (no days
+     *     or no assets), non-finite input, a return &lt;= -1, negative cost,
+     *     invalid dates, or a wipe-out ({@code net[t] <= -1}; the message
+     *     names t) — API_SPEC 2
      */
     public static Result run(double[][] positions, double[][] returns, double costBps, LocalDate[] dates) {
         if (positions == null || returns == null || positions.length == 0) {
@@ -186,22 +221,30 @@ public final class Backtest {
             throw new IllegalArgumentException("positions and returns must have equal shape");
         }
         int t2 = positions.length;
+        if (positions[0] == null || positions[0].length == 0) {
+            throw new IllegalArgumentException("empty backtest: no assets");
+        }
         int a2 = positions[0].length;
         for (int t = 0; t < t2; t++) {
-            if (positions[t].length != a2 || returns[t].length != a2) {
+            if (positions[t] == null || returns[t] == null
+                    || positions[t].length != a2 || returns[t].length != a2) {
                 throw new IllegalArgumentException("positions and returns must have equal shape");
             }
             for (int a = 0; a < a2; a++) {
                 if (!Double.isFinite(positions[t][a]) || !Double.isFinite(returns[t][a])) {
                     throw new IllegalArgumentException("positions/returns contain NaN or inf");
                 }
+                if (returns[t][a] <= -1.0) {
+                    throw new IllegalArgumentException("returns contain a return <= -100% at t=" + t
+                            + ", asset=" + a + " (" + returns[t][a] + ")");
+                }
             }
         }
-        if (costBps < 0.0) {
+        if (!Double.isFinite(costBps) || costBps < 0.0) {
             throw new IllegalArgumentException("cost_bps must be >= 0, got " + costBps);
         }
-        if (dates != null && dates.length != t2) {
-            throw new IllegalArgumentException("dates length does not match number of days");
+        if (dates != null) {
+            validateDates(dates, t2);
         }
         double[] gross = new double[t2];
         double[] turnover = new double[t2];
@@ -222,6 +265,9 @@ public final class Backtest {
             gross[t] = g;
             turnover[t] = to;
             net[t] = g - cost * to;
+        }
+        validateNet(net); // wipe-out guard: net[t] <= -1 is an error naming t
+        for (int t = 0; t < t2; t++) {
             eq *= 1.0 + net[t];
             equity[t] = eq;
         }
@@ -238,11 +284,26 @@ public final class Backtest {
      * @param states integer state labels per day, length T
      * @param nStates number of states K
      * @return per-state statistics, index = state label
-     * @throws IllegalArgumentException when lengths disagree
+     * @throws IllegalArgumentException when lengths disagree, net is
+     *     non-finite, {@code nStates < 1}, or a label is outside
+     *     {@code [0, nStates)} (pinned: labels are never silently dropped)
      */
     public static StateStats[] stateConditionalReturns(double[] net, int[] states, int nStates) {
         if (net == null || states == null || net.length != states.length) {
             throw new IllegalArgumentException("net returns and states must have equal length");
+        }
+        for (double v : net) {
+            if (!Double.isFinite(v)) {
+                throw new IllegalArgumentException("net returns contain NaN or inf");
+            }
+        }
+        if (nStates < 1) {
+            throw new IllegalArgumentException("n_states must be an integer >= 1, got " + nStates);
+        }
+        for (int s : states) {
+            if (s < 0 || s >= nStates) {
+                throw new IllegalArgumentException("state labels must be integers in [0, " + nStates + ")");
+            }
         }
         StateStats[] out = new StateStats[nStates];
         for (int k = 0; k < nStates; k++) {

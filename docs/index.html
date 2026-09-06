@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>regime-aware-trading — Gaussian HMM regime gating of momentum and FX carry in four languages</title>
+<!-- GitHub Pages landing page. If the repository is renamed, update the
+     github.com/AshJha0/regime-aware-trading links below to match. -->
+<style>
+:root{--teal:#16697a;--green:#16a085;--ink:#1a1a2e;--muted:#556}
+body{font-family:'Segoe UI',Arial,sans-serif;margin:0;color:var(--ink);background:#f7f8fa}
+header{background:var(--teal);color:#fff;padding:3rem 2rem}
+header h1{margin:0 0 .5rem;font-size:2.2rem}
+header p{margin:0;max-width:52rem;opacity:.92;line-height:1.5}
+.wrap{max-width:64rem;margin:0 auto;padding:0 2rem}
+nav{margin-top:1.2rem}
+nav a{display:inline-block;background:var(--green);color:#fff;text-decoration:none;
+  padding:.55rem 1.1rem;margin:.25rem .6rem .25rem 0;border-radius:4px;font-weight:600}
+nav a.secondary{background:rgba(255,255,255,.15)}
+h2{color:var(--teal);border-bottom:2px solid #e3e8ec;padding-bottom:.3rem;margin-top:2.5rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:1rem;margin:1.2rem 0}
+.card{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);padding:1rem 1.2rem;border-radius:4px}
+.card h3{margin:.1rem 0 .5rem;font-size:1.02rem;color:var(--teal)}
+.card p{margin:0;font-size:.9rem;color:var(--muted);line-height:1.45}
+pre{background:#10222a;color:#d7e3ea;padding:1rem 1.2rem;border-radius:4px;overflow-x:auto;
+  font-size:.85rem;line-height:1.5}
+.numbers{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);border-radius:4px;
+  padding:1rem 1.4rem;font-family:Consolas,monospace;font-size:.88rem;line-height:1.7}
+.numbers table{border-collapse:collapse}
+.numbers td{padding:.05rem 1.2rem .05rem 0;vertical-align:top}
+.numbers td:first-child{color:var(--teal);white-space:nowrap}
+.honest{background:#fff8ec;border-left:4px solid var(--green);padding:.8rem 1.2rem;
+  border-radius:4px;font-size:.92rem;line-height:1.55;margin:1.2rem 0}
+footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>regime-aware-trading</h1>
+    <p>A four-language reference implementation (Python reference, C++, Rust, Java) of a regime-aware trading study: a diagonal-covariance Gaussian hidden Markov model — scaled forward-backward, deterministic Baum-Welch EM, Viterbi decoding, AIC/BIC model selection — fitted walk-forward on a market index and used to gate time-series momentum and an FX carry basket through a shared no-lookahead backtest engine. Initialisation, convergence semantics, the dead-state guard, label ordering, rebalance schedules, accounting and validation are all pinned in API_SPEC.md, no library code uses an RNG, and all four ports reproduce 20 golden cases (77 scalars) to 1e-6..1e-8.</p>
+    <nav>
+      <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LEARN.md">Learn (guide)</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/COOKBOOK.md">Cookbook</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/API_SPEC.md">API contract</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading#references">References</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading">GitHub</a>
+      <a class="secondary" href="https://ashjha0.github.io/quant-portfolio/">Quant portfolio</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <h2>Measured, not claimed</h2>
+  <div class="numbers"><table>
+    <tr><td>Cross-language parity</td><td>python 74 · cpp 69 · rust 70 · java 70 tests — 283 green, plus 56 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
+    <tr><td>Golden suite</td><td>20 named cases / 77 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
+    <tr><td>Ground truth</td><td>forward likelihood, smoothed marginals and the Viterbi path checked against brute-force sums over all 8 paths of a K = 2, T = 3 model (1e-12); EM monotone on the bundled index; transition rows sum to 1 (1e-12); <code>pi P = pi</code> (1e-10)</td></tr>
+    <tr><td>Determinism</td><td>no RNG in library code (only the seeded generator, numpy <code>default_rng(83)</code>); pinned Hyndman-Fan-7 quantile initialisation, iteration order and tie-breaks; two fits are bitwise identical; any cross-language drift is a bug, not noise</td></tr>
+    <tr><td>No lookahead</td><td>P[t] decided at the close of day t from data through t, earns r[t+1]; the walk-forward gate uses filtered (causal) probabilities under a model fitted on r[0..t], refit every 63 days on an expanding window; a one-day-shift test enforces it</td></tr>
+    <tr><td>Pinned guards</td><td>dead-state guard: transition-row support &lt; 1e-12 stops EM before the M-step with finite parameters and <code>dead_state = i</code> · <code>converged</code>/<code>monotone</code> flags · wipe-out (<code>net[t] ≤ −1</code>) and returns ≤ −1 are errors · strictly increasing dates</td></tr>
+    <tr><td>Headline result</td><td>on bundled data from a true 3-state model: Viterbi accuracy 94.85 %; combined book Sharpe 1.80 → 1.87 and maxDD −5.23 % → −3.41 % with the filter, total return +7.07 % → +4.88 % — a best case for the method, not an expectation for real markets</td></tr>
+    <tr><td>Strategy config</td><td>momentum: 252-day signal, EWMA vol target (λ = 0.94), 4× leverage cap · carry: rank differentials, top/bottom 3 of 6, 21-day rebalance · costs 5 bp one-way on turnover · 252-day annualisation, raw Sharpe</td></tr>
+  </table></div>
+
+  <div class="honest"><strong>What the latest review found and fixed.</strong> Baum-Welch's M-step divides by the posterior mass of each state; a state that loses all support (for example a warm start parked far from the data) produced a <code>0/0</code> and let NaN parameters leave <code>fit</code>. The review pinned a dead-state guard in every port — after each E-step the transition-row support is compared with 1e-12, and EM stops <em>before</em> the M-step with the just-scored finite parameters, <code>converged = False</code> and <code>dead_state = i</code>, so the reported log-likelihood is always the exact score of the returned parameters — plus a <code>monotone</code> flag, parameter/shape validation on every inference call, zero-normaliser errors, wipe-out and date checks. It also added the synthetic <code>carry_rerank_*</code> golden cases, which are the only golden protection for the ranking/rebalance path: the bundled carry differentials never change rank, so the demo basket built on day 0 is held for all 2000 days. <code>golden.json</code> was regenerated to 20 cases / 77 scalars with all 47 previous scalars bit-identical. Note also that the demo's full-sample metrics include 251 days with no momentum position and 503 days before the first walk-forward fit.</div>
+
+  <h2>What's inside</h2>
+  <div class="grid">
+    <div class="card"><h3>Gaussian HMM</h3>
+      <p><code>hmm.py</code> and its ports: diagonal-covariance Gaussian emissions (D = 1, 2; K ≥ 2), scaled forward-backward with per-step normalisers and an emission shift, filtered and smoothed state probabilities, log-space Viterbi with a pinned tie-break, a pinned power-method stationary distribution, and log-likelihood / AIC / BIC for K = 2 vs 3 model selection. Zero forward normalisers are errors, never NaN.</p></div>
+    <div class="card"><h3>Baum-Welch EM, pinned</h3>
+      <p>Deterministic, RNG-free: quantile initialisation (Hyndman-Fan definition 7), Bilmes' Gaussian M-step with the <code>t ≤ T−1</code> transition denominator, a variance floor, states relabelled by ascending mean, a dead-state guard and <code>converged</code> / <code>dead_state</code> / <code>monotone</code> flags on the fit result. Non-convergence at <code>max_iter</code> is reported, not thrown; the returned parameters are always finite.</p></div>
+    <div class="card"><h3>Strategies</h3>
+      <p><code>strategies.py</code>: time-series momentum (Moskowitz-Ooi-Pedersen) with a 252-day signal, RiskMetrics EWMA vol targeting and a 4× leverage cap; an FX carry basket (Lustig-Roussanov-Verdelhan style) long the top-3 and short the bottom-3 rate differentials, rebalanced every 21 days with index tie-break; and the walk-forward regime gate that scales positions by the filtered P(calm) — the calm state re-identified by lowest variance at every refit — with warm-started refits every 63 days.</p></div>
+    <div class="card"><h3>Backtest engine</h3>
+      <p><code>backtest.py</code>: pinned accounting with positions decided at the close and earning the next day's return, one-way costs in basis points of notional turnover charged on the trade date, and seven metrics — annualised return and vol, raw Sharpe, max drawdown, Calmar, hit rate, worst month — plus a crisis-state attribution table keyed to the fitted K = 3 model. A wipe-out (<code>net[t] ≤ −1</code>) names the day and raises.</p></div>
+    <div class="card"><h3>Data &amp; pipeline</h3>
+      <p><code>data/</code> holds 2000 trading days generated from a true 3-state regime model (calm-bull / choppy / crisis): the market index, 6 futures-like trend assets, 6 synthetic currencies with spot returns and rate differentials, the generator's true state path for teaching comparison, and a pinned <code>config.json</code>. <code>pipeline.py</code> runs model selection, the fit, the six strategy variants and attribution end to end; <code>generate_data.py</code> rewrites CSVs and goldens byte-for-byte reproducibly.</p></div>
+    <div class="card"><h3>Golden suite &amp; testing</h3>
+      <p>Five mirrored layers per language: ground truth by enumeration, mathematical properties (monotone EM, stochastic rows, stationarity, chained <code>forward_step</code> equals the full pass, costs never help, the accounting identity, the no-lookahead shift), the 20-case / 77-scalar golden file with baked-in sign and semantic invariants (crisis momentum return &lt; 0, filtered combined Sharpe higher and drawdown shallower, re-rank panel flips at day 21), edge cases, and robustness (dead state, zero-likelihood data, malformed warm starts). C++ parses the JSON with a hand-rolled reader, Rust with serde_json, Java with a bundled parser.</p></div>
+    <div class="card"><h3>Validation &amp; error contract</h3>
+      <p>Same rules and error family everywhere — <code>ValueError</code>, <code>std::invalid_argument</code>, <code>Err(RegimeError::InvalidInput)</code>, <code>IllegalArgumentException</code>: empty inputs, NaN/inf, K/D and positions/returns/dates shape mismatches, non-stochastic parameters, returns ≤ −1, negative costs, <code>K &lt; 2</code>, <code>T ≤ K</code>, thresholds outside [0, 1], labels outside [0, K), duplicated or unsorted dates. Rust never panics on library input; Java never throws <code>ArrayIndexOutOfBoundsException</code> from a public method.</p></div>
+    <div class="card"><h3>Units, timing, scope</h3>
+      <p>Simple daily returns; annualised simple rate differentials accrued as <code>diff[t−1] / 252</code> with no compounding or forward points; a day is a row, dates only define calendar months. Out of scope: missing-data handling, market impact or bid/ask asymmetry, position limits, financing, FX quote conventions, non-Gaussian emissions, multiple random restarts (EM reaches one deterministic local optimum), and label-switching warnings between refits. No upper bound on K is enforced — K = 20 on 504 points will fit and over-fit.</p></div>
+    <div class="card"><h3>References</h3>
+      <p>Baum, Petrie, Soules &amp; Weiss (1970); Rabiner (1989) for scaling, re-estimation and the zero-mass discussion behind the dead-state guard; Bilmes (1998); Viterbi (1967); Hamilton (1989) for filtered regime probabilities; Akaike (1974); Schwarz (1978); Hyndman &amp; Fan (1996); Moskowitz, Ooi &amp; Pedersen (2012); Hurst, Ooi &amp; Pedersen (2017); RiskMetrics (1996); Fama (1984); Brunnermeier, Nagel &amp; Pedersen (2008); Lustig, Roussanov &amp; Verdelhan (2011); Sharpe (1994); Bishop, Hamilton (1994), Ang &amp; Bekaert and López de Prado as background.</p></div>
+    <div class="card"><h3>Guide &amp; cookbook</h3>
+      <p>LEARN.md builds HMMs from first principles through scaling, Baum-Welch, Viterbi and model selection, then momentum, carry, regime filtering and the danger of lookahead, honest limitations, numerical pitfalls and interview Q&amp;A. COOKBOOK.md's 56 snippets in all four languages are compiled and run against the built libraries by <code>tools/check_cookbook.py</code>.</p></div>
+  </div>
+
+  <h2>Part of a wider portfolio</h2>
+  <div class="grid">
+    <div class="card"><h3><a href="https://ashjha0.github.io/quant-portfolio/" style="color:inherit">quant-portfolio</a></h3>
+      <p>The end-to-end quantitative finance portfolio this project sits alongside: 10 project
+         areas built twice each (equity + FX) in Python with C++ and Rust performance twins —
+         31 sub-projects with golden-vector cross-language validation, a 481-question learning
+         guide and a verified cookbook. <a href="https://github.com/AshJha0/quant-portfolio">GitHub&nbsp;→</a></p></div>
+    <div class="card"><h3><a href="https://ashjha0.github.io/intraday-alpha-platform/" style="color:inherit">intraday-alpha-platform</a></h3>
+      <p>A polyglot (Python/C++/Rust/Java) research-to-production intraday trading platform:
+         market data → order books → 205-feature factory → 24 alphas → validation → portfolio →
+         fail-closed risk → execution → TCA, with an adaptive drift/lifecycle layer and 1,160
+         golden-parity tests. <a href="https://github.com/AshJha0/intraday-alpha-platform">GitHub&nbsp;→</a></p></div>
+    <div class="card"><h3><a href="https://github.com/AshJha0/Quant-Finance-Library" style="color:inherit">quantfinlib</a></h3>
+      <p>A zero-dependency quantitative finance platform for the JVM — research, validation,
+         execution and connectivity, from walk-forward backtesting to a measured
+         sub-microsecond tick-to-order path, with 1,090+ tests and CI on every push.
+         <a href="https://github.com/AshJha0/Quant-Finance-Library">GitHub&nbsp;→</a></p></div>
+  </div>
+
+  <h2>Quick start</h2>
+<pre>git clone https://github.com/AshJha0/regime-aware-trading &amp;&amp; cd regime-aware-trading
+
+# Python reference (3.11, numpy &gt;= 1.24, pandas &gt;= 2.0, pytest)
+cd python
+PYTHONPATH=src python3 demo.py          # end-to-end demo
+PYTHONPATH=src python3 -m pytest -q     # test suite (74 tests)
+cd ..
+
+# C++ (C++17, CMake &gt;= 3.20, GoogleTest)
+cd cpp
+bash build.sh                           # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j2
+./build/demo                            # demo
+ctest --test-dir build --output-on-failure   # tests (GoogleTest, 69 tests in one binary)
+cd ..
+
+# Rust (edition 2021)
+cd rust
+cargo build --release                   # zero warnings
+cargo run --release --bin demo          # demo
+cargo test --release                    # 70 integration tests
+cd ..
+
+# Java (21, JUnit 4 + Hamcrest — no Maven/Gradle)
+cd java
+bash build.sh                           # javac -Xlint:all -Werror into out/
+bash demo.sh                            # demo main
+bash test.sh                            # JUnitCore on all *Test classes (70 tests)
+cd ..
+
+# cookbook snippets, after the three native builds (56 snippets)
+python3 tools/check_cookbook.py</pre>
+
+  <footer>regime-aware-trading — four golden-pinned ports of an HMM regime gate over momentum and carry, with the lookahead rules and limitations stated up front. See the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/README.md">README</a> and the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LICENSE">MIT license</a>.</footer>
+</div>
+</body>
+</html>

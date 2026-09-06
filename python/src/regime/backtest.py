@@ -55,11 +55,56 @@ class BacktestResult:
     metrics: Dict[str, float]
 
 
+def _coerce_dates(dates, T: int) -> pd.DatetimeIndex:
+    """Coerce ``dates`` to a ``DatetimeIndex`` of length ``T`` (pinned checks).
+
+    Raises ``ValueError`` if the dates cannot be parsed, the length is not
+    ``T``, or they are not strictly increasing (duplicates and out-of-order
+    rows are the most common real-feed defects, and every port's
+    ``worst_month`` assumes sorted dates — API_SPEC 2.1).
+    """
+    try:
+        idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"dates could not be parsed: {exc}") from exc
+    if len(idx) != T:
+        raise ValueError(f"dates length {len(idx)} does not match number of days {T}")
+    if idx.hasnans:
+        raise ValueError("dates contain NaT")
+    if not (idx.is_monotonic_increasing and idx.is_unique):
+        raise ValueError("dates must be strictly increasing")
+    return idx
+
+
+def _validate_net(net) -> np.ndarray:
+    """Coerce a daily net-return series; reject empty, non-finite or <= -1."""
+    net = np.asarray(net, dtype=float)
+    if net.ndim != 1:
+        raise ValueError("net return series must be 1-D")
+    if net.size == 0:
+        raise ValueError("net return series is empty")
+    if not np.all(np.isfinite(net)):
+        raise ValueError("net returns contain NaN or inf")
+    bad = np.flatnonzero(net <= -1.0)
+    if bad.size > 0:
+        t = int(bad[0])
+        raise ValueError(f"equity wiped out on day t={t}: net return {net[t]} <= -100%")
+    return net
+
+
 def max_drawdown(equity: np.ndarray) -> float:
-    """Maximum drawdown of an equity curve, as a non-positive fraction."""
+    """Maximum drawdown of an equity curve, as a non-positive fraction.
+
+    Raises:
+        ValueError: If the curve is empty, non-finite, or not strictly
+            positive (a drawdown from or to a non-positive equity is
+            undefined; ``run_backtest`` rejects wipe-outs before this).
+    """
     eq = np.asarray(equity, dtype=float)
-    if eq.size == 0:
+    if eq.ndim != 1 or eq.size == 0:
         raise ValueError("equity curve is empty")
+    if not np.all(np.isfinite(eq)) or np.any(eq <= 0.0):
+        raise ValueError("equity curve must be finite and strictly positive")
     peak = np.maximum.accumulate(eq)
     return float(np.min(eq / peak - 1.0))
 
@@ -69,19 +114,24 @@ def compute_metrics(net: np.ndarray, dates: Optional[pd.DatetimeIndex] = None) -
 
     Args:
         net: Daily net returns, shape ``(T,)``.
-        dates: Optional dates for the worst-calendar-month metric; when
-            omitted, ``worst_month`` is computed over consecutive 21-day
-            blocks instead.
+        dates: Optional dates (anything ``pd.to_datetime`` accepts; length
+            T, strictly increasing) for the worst-calendar-month metric;
+            when omitted, ``worst_month`` is computed over consecutive
+            21-day blocks instead (the trailing partial block is dropped —
+            pinned, API_SPEC 2.1).
 
     Returns:
         Dict with ann_return, ann_vol, sharpe, max_dd, calmar, hit_rate,
         worst_month.
+
+    Raises:
+        ValueError: Empty/non-finite ``net``, a net return ``<= -1``
+            (wipe-out), or dates that are the wrong length, unparseable, or
+            not strictly increasing.
     """
-    net = np.asarray(net, dtype=float)
-    if net.size == 0:
-        raise ValueError("net return series is empty")
-    if not np.all(np.isfinite(net)):
-        raise ValueError("net returns contain NaN or inf")
+    net = _validate_net(net)
+    if dates is not None:
+        dates = _coerce_dates(dates, net.size)
     ann_ret = TRADING_DAYS * float(np.mean(net))
     ann_vol = float(np.sqrt(TRADING_DAYS) * np.std(net, ddof=0))
     sharpe = ann_ret / ann_vol if ann_vol > 0.0 else 0.0
@@ -127,7 +177,10 @@ def run_backtest(
         :class:`BacktestResult`.
 
     Raises:
-        ValueError: On shape mismatch, non-finite input, or negative cost.
+        ValueError: On shape mismatch, empty input (no days or no assets),
+            non-finite input, a return ``<= -1``, negative cost, invalid
+            dates, or a wipe-out (``net[t] <= -1`` for some day; the
+            message names ``t``) — pinned, API_SPEC 2.
     """
     P = np.asarray(positions, dtype=float)
     r = np.asarray(returns, dtype=float)
@@ -135,23 +188,29 @@ def run_backtest(
         P = P[:, None]
     if r.ndim == 1:
         r = r[:, None]
-    if P.shape != r.shape:
+    if P.ndim != 2 or r.ndim != 2 or P.shape != r.shape:
         raise ValueError(f"positions {P.shape} and returns {r.shape} must have equal shape")
     if P.shape[0] == 0:
         raise ValueError("empty backtest: no days")
+    if P.shape[1] == 0:
+        raise ValueError("empty backtest: no assets")
     if not (np.all(np.isfinite(P)) and np.all(np.isfinite(r))):
         raise ValueError("positions/returns contain NaN or inf")
-    if cost_bps < 0.0:
+    if np.any(r <= -1.0):
+        t, a = np.argwhere(r <= -1.0)[0]
+        raise ValueError(f"returns contain a return <= -100% at t={t}, asset={a} ({r[t, a]})")
+    if not np.isfinite(cost_bps) or cost_bps < 0.0:
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
-    if dates is not None and len(dates) != P.shape[0]:
-        raise ValueError("dates length does not match number of days")
-
     T = P.shape[0]
+    if dates is not None:
+        dates = _coerce_dates(dates, T)
+
     gross = np.zeros(T)
     gross[1:] = np.sum(P[:-1] * r[1:], axis=1)
     P_prev = np.vstack([np.zeros((1, P.shape[1])), P[:-1]])
     turnover = np.sum(np.abs(P - P_prev), axis=1)
     net = gross - (cost_bps / 1e4) * turnover
+    net = _validate_net(net)  # wipe-out guard: net[t] <= -1 is an error naming t
     equity = np.cumprod(1.0 + net)
     return BacktestResult(gross, net, turnover, equity, compute_metrics(net, dates))
 
@@ -169,11 +228,25 @@ def state_conditional_returns(net: np.ndarray, states: np.ndarray, n_states: int
 
     Returns:
         Per-state dict with n_days, ann_return, ann_vol, sharpe.
+
+    Raises:
+        ValueError: Length mismatch, non-finite ``net``, ``n_states < 1``,
+            or a state label outside ``[0, n_states)`` (pinned: labels are
+            never silently dropped).
     """
     net = np.asarray(net, dtype=float)
     states = np.asarray(states)
-    if net.shape != states.shape:
+    if net.ndim != 1 or states.ndim != 1 or net.shape != states.shape:
         raise ValueError("net returns and states must have equal length")
+    if not np.all(np.isfinite(net)):
+        raise ValueError("net returns contain NaN or inf")
+    if int(n_states) != n_states or n_states < 1:
+        raise ValueError(f"n_states must be an integer >= 1, got {n_states}")
+    n_states = int(n_states)
+    if states.size > 0 and (
+        not np.issubdtype(states.dtype, np.integer) or states.min() < 0 or states.max() >= n_states
+    ):
+        raise ValueError(f"state labels must be integers in [0, {n_states})")
     out: Dict[int, Dict[str, float]] = {}
     for k in range(n_states):
         mask = states == k

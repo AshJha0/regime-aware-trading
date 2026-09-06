@@ -197,3 +197,102 @@ TEST(RegimeGate, ApplyGate) {
     for (std::size_t t = 0; t < 5; ++t) EXPECT_NEAR(out(t, 0), gate[t], 1e-15);
     EXPECT_THROW(regime::apply_gate(pos, {1.0, 0.5, 0.0}), std::invalid_argument);
 }
+
+// ------------------------------------------------------------------------- //
+// Robustness: corrupt returns, re-ranking, gate edges
+// ------------------------------------------------------------------------- //
+
+TEST(Momentum, RejectsReturnsBelowMinusOne) {
+    // PT-4: a -100% (or worse) print is corrupt data, not a signal.
+    for (double bad : {-1.0, -1.5}) {
+        Matrix r = constant_matrix(300, {0.001});
+        r(10, 0) = bad;
+        EXPECT_THROW(regime::momentum_positions(r, 252), std::invalid_argument);
+        EXPECT_THROW(regime::ewma_variance(r, 0.94, 252), std::invalid_argument);
+        EXPECT_THROW(regime::carry_total_returns(r, Matrix(300, 1, 0.0)), std::invalid_argument);
+    }
+    // -99.9% is legal (extreme, but a valid simple return).
+    Matrix r = constant_matrix(300, {0.001});
+    r(10, 0) = -0.999;
+    const Matrix pos = regime::momentum_positions(r, 252);
+    for (double v : pos.data) EXPECT_TRUE(std::isfinite(v));
+    // Rate differentials are not simple returns: -1.5 is accepted there.
+    const Matrix d(10, 4, -1.5);
+    EXPECT_EQ(regime::carry_positions(d, 1, 1).rows, 10u);
+}
+
+TEST(Carry, RerankAfterCrossing) {
+    // PT-6: the book flips exactly at the first rebalance after the ranks
+    // cross, with turnover 4 (two full round-trips) on that day only.
+    Matrix d(45, 4);
+    for (std::size_t t = 0; t < 45; ++t) {
+        const double before[4] = {0.04, 0.03, 0.02, 0.01};
+        const double after[4] = {0.01, 0.02, 0.03, 0.04};
+        for (std::size_t a = 0; a < 4; ++a) d(t, a) = t < 21 ? before[a] : after[a];
+    }
+    const Matrix pos = regime::carry_positions(d, 1, 1, 21);
+    const double p20[4] = {1.0, 0.0, 0.0, -1.0};
+    const double p21[4] = {-1.0, 0.0, 0.0, 1.0};
+    for (std::size_t a = 0; a < 4; ++a) EXPECT_EQ(pos(20, a), p20[a]);
+    for (std::size_t t = 21; t < 42; ++t)
+        for (std::size_t a = 0; a < 4; ++a) EXPECT_EQ(pos(t, a), p21[a]);
+    for (std::size_t t = 1; t < 45; ++t) {
+        double to = 0.0;
+        for (std::size_t a = 0; a < 4; ++a) to += std::abs(pos(t, a) - pos(t - 1, a));
+        EXPECT_EQ(to, t == 21 ? 4.0 : 0.0) << "turnover at t=" << t;
+    }
+    // Tie at the crossing day -> ascending asset index decides.
+    Matrix tie = d;
+    for (std::size_t t = 21; t < 45; ++t)
+        for (std::size_t a = 0; a < 4; ++a) tie(t, a) = 0.02;
+    const Matrix pos_tie = regime::carry_positions(tie, 1, 1, 21);
+    for (std::size_t a = 0; a < 4; ++a) EXPECT_EQ(pos_tie(21, a), p20[a]);
+}
+
+TEST(RegimeGate, BinaryThresholdEdges) {
+    // PT-12: the '>=' convention at both ends of [0, 1]; outside is an error.
+    const std::vector<double> r = index_slice(600);
+    const auto prob = regime::regime_gate(r, 3, 400, 300, "prob");
+    const auto lo = regime::regime_gate(r, 3, 400, 300, "binary", 0.0);
+    for (std::size_t t = 399; t < 600; ++t) EXPECT_EQ(lo.gate[t], 1.0);
+    const auto hi = regime::regime_gate(r, 3, 400, 300, "binary", 1.0);
+    for (std::size_t t = 399; t < 600; ++t) EXPECT_EQ(hi.gate[t], prob.gate[t] == 1.0 ? 1.0 : 0.0);
+    for (double bad : {1.5, -0.1, std::nan("")})
+        EXPECT_THROW(regime::regime_gate(r, 3, 400, 300, "binary", bad), std::invalid_argument);
+}
+
+TEST(RegimeGate, EdgeWindows) {
+    // PT-13: degenerate but legal walk-forward geometries.
+    const auto one = regime::regime_gate(index_slice(400), 3, 400, 63);
+    EXPECT_EQ(one.gate.size(), 400u);
+    EXPECT_EQ(one.models.size(), 1u);
+    for (std::size_t t = 0; t < 399; ++t) EXPECT_EQ(one.gate[t], 1.0);
+    EXPECT_GE(one.gate[399], 0.0);
+    EXPECT_LE(one.gate[399], 1.0);
+    const auto two = regime::regime_gate(index_slice(500), 3, 400, 1000);
+    EXPECT_EQ(two.models.size(), 1u);
+    for (double g : two.gate) {
+        EXPECT_GE(g, 0.0);
+        EXPECT_LE(g, 1.0);
+    }
+    const auto tiny = regime::regime_gate(index_slice(4), 3, 4, 1);
+    EXPECT_EQ(tiny.models.size(), 1u);
+    for (double g : tiny.gate) EXPECT_TRUE(std::isfinite(g));
+}
+
+TEST(RegimeGate, ParameterValidation) {
+    // MAJ-7/MIN-11: schedule and HMM settings are validated before any fit.
+    const std::vector<double> r = index_slice(600);
+    EXPECT_THROW(regime::regime_gate(r, 3, 3), std::invalid_argument);         // train_min_days <= K
+    EXPECT_THROW(regime::regime_gate(r, 3, 400, 0), std::invalid_argument);    // refit_days < 1
+    EXPECT_THROW(regime::regime_gate(r, 1, 400), std::invalid_argument);       // n_states < 2
+    EXPECT_THROW(regime::regime_gate(r, 3, 400, 63, "prob", 0.5, 0.0), std::invalid_argument);
+    std::vector<double> nan = r;
+    nan.push_back(std::nan(""));
+    EXPECT_THROW(regime::regime_gate(nan, 3, 400), std::invalid_argument);
+}
+
+TEST(RegimeGate, ApplyGateRejectsNan) {
+    Matrix pos(5, 2, 1.0);
+    EXPECT_THROW(regime::apply_gate(pos, {1.0, std::nan(""), 0.0, 0.0, 0.0}), std::invalid_argument);
+}

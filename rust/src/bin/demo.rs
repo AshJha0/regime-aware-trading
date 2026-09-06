@@ -32,7 +32,7 @@ fn run() -> regime::Result<()> {
     println!("{LINE}");
     let pipe = run_full_pipeline(&data_dir, None, None)?;
     let ds = &pipe.dataset;
-    let k = pipe.config.n_states;
+    let k = pipe.hmm3.n_states; // the K=3 tables are keyed to the full-sample fit
     let t_len = ds.index_returns.len();
 
     // ---------------- model selection ---------------- //

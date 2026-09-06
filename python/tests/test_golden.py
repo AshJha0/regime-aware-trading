@@ -10,8 +10,8 @@ from regime import golden_cases
 
 def test_golden_file_has_expected_cases(golden):
     names = [c["name"] for c in golden["cases"]]
-    assert len(names) == 18
-    assert len(set(names)) == 18
+    assert len(names) == 20
+    assert len(set(names)) == 20
     for required in (
         "hmm_k2_loglik",
         "hmm_k3_loglik",
@@ -31,8 +31,20 @@ def test_golden_file_has_expected_cases(golden):
         "crisis_momentum_return",
         "turnover_momentum",
         "turnover_carry",
+        "carry_rerank_positions",
+        "carry_rerank_backtest",
     ):
         assert required in names
+    by_name = {c["name"]: c for c in golden["cases"]}
+    for name in ("momentum_unfiltered", "momentum_filtered", "carry_unfiltered", "carry_filtered"):
+        assert set(by_name[name]["expect"]) == {
+            "ann_return", "ann_vol", "sharpe", "max_dd", "calmar", "hit_rate", "worst_month"
+        }
+    assert set(by_name["combined_sharpe"]["expect"]) == {
+        "sharpe_unfiltered", "sharpe_filtered", "max_dd_unfiltered", "max_dd_filtered"
+    }
+    assert by_name["carry_rerank_positions"]["tol"] == 0.0
+    assert by_name["carry_rerank_positions"]["inputs"]["n_days"] == 63
 
 
 def test_golden_values_reproduced(golden, pipeline_full):
@@ -49,7 +61,7 @@ def test_golden_values_reproduced(golden, pipeline_full):
             else:
                 assert value == pytest.approx(expect, abs=tol), f"{case['name']}:{key}"
             checked += 1
-    assert checked >= 40  # many scalar comparisons across the 18 cases
+    assert checked == 77  # every scalar across the 20 cases
 
 
 def test_golden_sign_cases(golden):
@@ -70,6 +82,12 @@ def test_golden_sign_cases(golden):
         by_name["momentum_filtered"]["expect"]["ann_return"]
         < by_name["momentum_unfiltered"]["expect"]["ann_return"]
     )
+    # filtered combined drawdown is shallower too
+    assert cs["max_dd_filtered"] > cs["max_dd_unfiltered"]
+    # the re-ranking panel really re-ranks: the book flips at day 21
+    rr = by_name["carry_rerank_positions"]["expect"]
+    assert rr["pos_day15_asset0"] == 1.0 and rr["pos_day21_asset0"] == -1.0
+    assert rr["turnover_day21"] == 4.0
     # stationary distribution sums to one
     pis = by_name["hmm_k3_stationary"]["expect"]
     assert sum(pis.values()) == pytest.approx(1.0, abs=1e-8)
@@ -88,3 +106,39 @@ def test_shorter_refit_window_also_runs(data_dir):
     gate = pipe["gate"]
     assert np.all(gate[:999] == 1.0)
     assert np.all((gate >= 0.0) & (gate <= 1.0))
+
+
+def test_config_integer_keys_are_strict(data_dir, tmp_path):
+    """MAJ-7: the loaders agree — a non-integral n_states (3.0) is rejected."""
+    import json
+    import shutil
+
+    from regime import load_dataset
+
+    for name in ("market_index.csv", "trend_assets.csv", "fx_carry.csv", "true_states.csv"):
+        shutil.copy(data_dir / name, tmp_path / name)
+    cfg = json.loads((data_dir / "config.json").read_text())
+    cfg["n_states"] = 3.0
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    with pytest.raises(ValueError, match="n_states"):
+        load_dataset(tmp_path)
+    cfg["n_states"] = 3
+    cfg["cost_bps"] = "five"
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    with pytest.raises(ValueError, match="cost_bps"):
+        load_dataset(tmp_path)
+
+
+def test_true_states_range_is_checked(data_dir, tmp_path):
+    """MAJ-8: a label outside [0, 2] in true_states.csv is a ValueError at load."""
+    import shutil
+
+    from regime import load_dataset
+
+    for name in ("market_index.csv", "trend_assets.csv", "fx_carry.csv", "config.json"):
+        shutil.copy(data_dir / name, tmp_path / name)
+    lines = (data_dir / "true_states.csv").read_text().splitlines()
+    lines[1] = lines[1].rsplit(",", 1)[0] + ",3"
+    (tmp_path / "true_states.csv").write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match="true_states"):
+        load_dataset(tmp_path)

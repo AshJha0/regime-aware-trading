@@ -12,8 +12,26 @@ from .backtest import (
     run_backtest,
     state_conditional_returns,
 )
-from .hmm import GaussianHMM, HMMFitResult, HMMParams, forward_step
-from .pipeline import Dataset, golden_cases, load_dataset, run_full_pipeline
+from .hmm import (
+    DEAD_STATE_SUPPORT,
+    MONOTONE_REL_TOL,
+    EMStep,
+    GaussianHMM,
+    HMMFitResult,
+    HMMParams,
+    em_step_status,
+    forward_step,
+    validate_params,
+)
+from .pipeline import (
+    CARRY_RERANK_INPUTS,
+    Dataset,
+    carry_rerank_panel,
+    carry_rerank_values,
+    golden_cases,
+    load_dataset,
+    run_full_pipeline,
+)
 from .strategies import (
     apply_gate,
     carry_positions,
@@ -25,14 +43,21 @@ from .strategies import (
 
 __all__ = [
     "BacktestResult",
+    "CARRY_RERANK_INPUTS",
+    "DEAD_STATE_SUPPORT",
     "Dataset",
+    "EMStep",
     "GaussianHMM",
     "HMMFitResult",
     "HMMParams",
+    "MONOTONE_REL_TOL",
     "apply_gate",
     "carry_positions",
+    "carry_rerank_panel",
+    "carry_rerank_values",
     "carry_total_returns",
     "compute_metrics",
+    "em_step_status",
     "ewma_variance",
     "forward_step",
     "golden_cases",
@@ -43,6 +68,7 @@ __all__ = [
     "run_backtest",
     "run_full_pipeline",
     "state_conditional_returns",
+    "validate_params",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

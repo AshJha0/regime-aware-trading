@@ -249,7 +249,18 @@ pub fn load_dataset<P: AsRef<Path>>(data_dir: P) -> Result<Dataset> {
         out
     };
 
-    let true_states: Vec<usize> = ts.col(0).iter().map(|v| *v as usize).collect();
+    if t_len == 0 {
+        return Err(RegimeError::Data("bundled CSVs are empty".into()));
+    }
+    let mut true_states: Vec<usize> = Vec::with_capacity(t_len);
+    for v in ts.col(0) {
+        if v.fract() != 0.0 || !(0.0..=2.0).contains(&v) {
+            return Err(RegimeError::Data(
+                "true_states.csv: state labels must be integers in [0, 2]".into(),
+            ));
+        }
+        true_states.push(v as usize);
+    }
     Ok(Dataset {
         dates,
         index_returns,
@@ -294,9 +305,11 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let smoothed3 = hmm3.smoothed_probabilities(&r_idx)?;
     let stationary3 = hmm3.stationary_distribution()?;
 
-    // Teaching comparison via the pinned volatility mapping.
+    // Teaching comparison via the pinned volatility mapping of the K=3 fit
+    // (independent of the gate's config n_states).
+    let k3 = hmm3.n_states;
     let p3 = hmm3.params().expect("fitted");
-    let variances: Vec<f64> = (0..3).map(|i| p3.variances.get(i, 0)).collect();
+    let variances: Vec<f64> = (0..k3).map(|i| p3.variances.get(i, 0)).collect();
     let calm_label = argmin(&variances);
     let crisis_label = argmax(&variances);
     let choppy_label = 3 - calm_label - crisis_label;
@@ -361,14 +374,15 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let combined_filtered = combine(&momentum_filtered, &carry_filtered)?;
 
     // Crisis table: attribute daily strategy returns to the full-sample
-    // K=3 Viterbi state (state 0 = crisis on this data).
+    // K=3 Viterbi state (state 0 = crisis on this data); the table has k3
+    // rows regardless of the gate's n_states.
     let crisis = CrisisTables {
-        momentum_unfiltered: state_conditional_returns(&momentum_unfiltered.net_returns, &viterbi3, k)?,
-        momentum_filtered: state_conditional_returns(&momentum_filtered.net_returns, &viterbi3, k)?,
-        carry_unfiltered: state_conditional_returns(&carry_unfiltered.net_returns, &viterbi3, k)?,
-        carry_filtered: state_conditional_returns(&carry_filtered.net_returns, &viterbi3, k)?,
-        combined_unfiltered: state_conditional_returns(&combined_unfiltered.net_returns, &viterbi3, k)?,
-        combined_filtered: state_conditional_returns(&combined_filtered.net_returns, &viterbi3, k)?,
+        momentum_unfiltered: state_conditional_returns(&momentum_unfiltered.net_returns, &viterbi3, k3)?,
+        momentum_filtered: state_conditional_returns(&momentum_filtered.net_returns, &viterbi3, k3)?,
+        carry_unfiltered: state_conditional_returns(&carry_unfiltered.net_returns, &viterbi3, k3)?,
+        carry_filtered: state_conditional_returns(&carry_filtered.net_returns, &viterbi3, k3)?,
+        combined_unfiltered: state_conditional_returns(&combined_unfiltered.net_returns, &viterbi3, k3)?,
+        combined_filtered: state_conditional_returns(&combined_filtered.net_returns, &viterbi3, k3)?,
     };
 
     Ok(PipelineOutput {
@@ -461,22 +475,17 @@ pub fn golden_values(pipe: &PipelineOutput) -> BTreeMap<String, BTreeMap<String,
     }
     case("viterbi_accuracy_vs_true", vec![("accuracy".into(), pipe.viterbi_accuracy)]);
 
-    let strat = |m: &Metrics| {
-        vec![
-            ("ann_return".to_string(), m.ann_return),
-            ("sharpe".to_string(), m.sharpe),
-            ("max_dd".to_string(), m.max_dd),
-        ]
-    };
-    case("momentum_unfiltered", strat(&pipe.momentum_unfiltered.metrics));
-    case("momentum_filtered", strat(&pipe.momentum_filtered.metrics));
-    case("carry_unfiltered", strat(&pipe.carry_unfiltered.metrics));
-    case("carry_filtered", strat(&pipe.carry_filtered.metrics));
+    case("momentum_unfiltered", metric_entries(&pipe.momentum_unfiltered.metrics));
+    case("momentum_filtered", metric_entries(&pipe.momentum_filtered.metrics));
+    case("carry_unfiltered", metric_entries(&pipe.carry_unfiltered.metrics));
+    case("carry_filtered", metric_entries(&pipe.carry_filtered.metrics));
     case(
         "combined_sharpe",
         vec![
             ("sharpe_unfiltered".into(), pipe.combined_unfiltered.metrics.sharpe),
             ("sharpe_filtered".into(), pipe.combined_filtered.metrics.sharpe),
+            ("max_dd_unfiltered".into(), pipe.combined_unfiltered.metrics.max_dd),
+            ("max_dd_filtered".into(), pipe.combined_filtered.metrics.max_dd),
         ],
     );
     case(
@@ -493,4 +502,95 @@ pub fn golden_values(pipe: &PipelineOutput) -> BTreeMap<String, BTreeMap<String,
         vec![("mean_turnover".into(), mean_of(&pipe.carry_unfiltered.turnover))],
     );
     out
+}
+
+/// All seven pinned metrics of one strategy case, keyed as in golden.json.
+fn metric_entries(m: &Metrics) -> Vec<(String, f64)> {
+    vec![
+        ("ann_return".to_string(), m.ann_return),
+        ("ann_vol".to_string(), m.ann_vol),
+        ("sharpe".to_string(), m.sharpe),
+        ("max_dd".to_string(), m.max_dd),
+        ("calmar".to_string(), m.calmar),
+        ("hit_rate".to_string(), m.hit_rate),
+        ("worst_month".to_string(), m.worst_month),
+    ]
+}
+
+/// Inputs of the `carry_rerank_*` golden cases (API_SPEC.md §5): a
+/// piecewise-constant differential panel whose ranks cross.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CarryRerankInputs {
+    /// Number of days `T`.
+    pub n_days: usize,
+    /// Number of currencies `A`.
+    pub n_assets: usize,
+    /// Ascending day indices (starting at 0) at which `diffs` rows take effect.
+    pub switch_days: Vec<usize>,
+    /// One differential row per switch day.
+    pub diffs: Vec<Vec<f64>>,
+    /// Carry long book size.
+    pub top_n: usize,
+    /// Carry short book size.
+    pub bottom_n: usize,
+    /// Rebalance cadence (days).
+    pub rebalance_days: usize,
+    /// One-way cost in bps of turnover.
+    pub cost_bps: f64,
+}
+
+/// Build the pinned re-ranking panel: `diff[t] = diffs[k]` with `k` the
+/// last index whose `switch_days[k] <= t`.
+///
+/// # Errors
+/// Inconsistent inputs (ragged rows, unsorted switch days).
+pub fn carry_rerank_panel(inputs: &CarryRerankInputs) -> Result<Matrix> {
+    let (t_len, n_assets) = (inputs.n_days, inputs.n_assets);
+    let sw = &inputs.switch_days;
+    if sw.len() != inputs.diffs.len()
+        || sw.first() != Some(&0)
+        || sw.windows(2).any(|w| w[1] <= w[0])
+    {
+        return Err(RegimeError::InvalidInput(
+            "carry_rerank inputs: switch_days must start at 0 and be strictly increasing".into(),
+        ));
+    }
+    let mut panel = Matrix::zeros(t_len, n_assets);
+    let mut k = 0;
+    for t in 0..t_len {
+        while k + 1 < sw.len() && sw[k + 1] <= t {
+            k += 1;
+        }
+        let row = &inputs.diffs[k];
+        if row.len() != n_assets {
+            return Err(RegimeError::InvalidInput("carry_rerank inputs: ragged diffs".into()));
+        }
+        for a in 0..n_assets {
+            panel.set(t, a, row[a]);
+        }
+    }
+    Ok(panel)
+}
+
+/// Every `carry_rerank_*` golden scalar computed from the pinned inputs.
+///
+/// # Errors
+/// Any downstream validation failure.
+pub fn carry_rerank_values(inputs: &CarryRerankInputs) -> Result<BTreeMap<String, f64>> {
+    let diffs = carry_rerank_panel(inputs)?;
+    let pos = carry_positions(&diffs, inputs.top_n, inputs.bottom_n, inputs.rebalance_days)?;
+    let rets = carry_total_returns(&Matrix::zeros(diffs.rows(), diffs.cols()), &diffs)?;
+    let res = run_backtest(&pos, &rets, inputs.cost_bps, None)?;
+    let mean_to = res.turnover.iter().sum::<f64>() / res.turnover.len() as f64;
+    let mut out = BTreeMap::new();
+    out.insert("mean_turnover".to_string(), mean_to);
+    out.insert("turnover_day21".to_string(), res.turnover[21]);
+    out.insert("turnover_day42".to_string(), res.turnover[42]);
+    for (t, a) in [(15, 0), (15, 3), (21, 0), (21, 3), (42, 0), (42, 3)] {
+        out.insert(format!("pos_day{t}_asset{a}"), pos.try_get(t, a)?);
+    }
+    out.insert("ann_return".to_string(), res.metrics.ann_return);
+    out.insert("sharpe".to_string(), res.metrics.sharpe);
+    out.insert("max_dd".to_string(), res.metrics.max_dd);
+    Ok(out)
 }

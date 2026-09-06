@@ -10,6 +10,8 @@
 #include <string>
 
 #include "mini_json.hpp"
+#include "regime/backtest.hpp"
+#include "regime/strategies.hpp"
 #include "test_common.hpp"
 
 using regime_tests::full_pipeline;
@@ -28,8 +30,70 @@ const mini_json::Value& golden() {
     return doc;
 }
 
+double metric_by_key(const regime::Metrics& m, const std::string& key) {
+    if (key == "ann_return") return m.ann_return;
+    if (key == "ann_vol") return m.ann_vol;
+    if (key == "sharpe") return m.sharpe;
+    if (key == "max_dd") return m.max_dd;
+    if (key == "calmar") return m.calmar;
+    if (key == "hit_rate") return m.hit_rate;
+    if (key == "worst_month") return m.worst_month;
+    throw std::runtime_error("unknown metric key: " + key);
+}
+
+/// Build the pinned re-ranking differential panel from a case's `inputs`
+/// (API_SPEC 5): diff[t] = diffs[k] with k the last index whose
+/// switch_days[k] <= t.
+regime::Matrix carry_rerank_panel(const mini_json::Value& inputs) {
+    const auto T = static_cast<std::size_t>(inputs.at("n_days").num());
+    const auto A = static_cast<std::size_t>(inputs.at("n_assets").num());
+    const auto& switch_days = inputs.at("switch_days").arr;
+    const auto& diffs = inputs.at("diffs").arr;
+    if (switch_days.size() != diffs.size() || switch_days.empty() || switch_days[0].num() != 0.0)
+        throw std::runtime_error("carry_rerank inputs: bad switch_days");
+    regime::Matrix panel(T, A);
+    std::size_t k = 0;
+    for (std::size_t t = 0; t < T; ++t) {
+        while (k + 1 < switch_days.size() &&
+               static_cast<std::size_t>(switch_days[k + 1].num()) <= t)
+            ++k;
+        const auto& row = diffs[k].arr;
+        if (row.size() != A) throw std::runtime_error("carry_rerank inputs: ragged diffs");
+        for (std::size_t a = 0; a < A; ++a) panel(t, a) = row[a].num();
+    }
+    return panel;
+}
+
+/// Every `carry_rerank_*` scalar computed by the C++ port from `inputs`.
+double carry_rerank_value(const mini_json::Value& inputs, const std::string& key) {
+    const regime::Matrix diffs = carry_rerank_panel(inputs);
+    const regime::Matrix pos = regime::carry_positions(
+        diffs, static_cast<int>(inputs.at("top_n").num()),
+        static_cast<int>(inputs.at("bottom_n").num()),
+        static_cast<int>(inputs.at("rebalance_days").num()));
+    const regime::Matrix rets =
+        regime::carry_total_returns(regime::Matrix(diffs.rows, diffs.cols, 0.0), diffs);
+    const regime::BacktestResult res =
+        regime::run_backtest(pos, rets, inputs.at("cost_bps").num());
+    if (key == "mean_turnover") {
+        double mean = 0.0;
+        for (double x : res.turnover) mean += x;
+        return mean / static_cast<double>(res.turnover.size());
+    }
+    if (key == "turnover_day21") return res.turnover[21];
+    if (key == "turnover_day42") return res.turnover[42];
+    if (key.rfind("pos_day", 0) == 0) {  // pos_day<T>_asset<A>
+        const std::size_t us = key.find("_asset");
+        const std::size_t t = std::stoul(key.substr(7, us - 7));
+        const std::size_t a = std::stoul(key.substr(us + 6));
+        return pos(t, a);
+    }
+    return metric_by_key(res.metrics, key);
+}
+
 /// Value computed by the C++ pipeline for one (case, key) pair.
-double computed_value(const std::string& case_name, const std::string& key) {
+double computed_value(const std::string& case_name, const std::string& key,
+                      const mini_json::Value& inputs) {
     const regime::PipelineResult& pipe = full_pipeline();
     const regime::HMMParams& p3 = pipe.hmm3.params();
 
@@ -67,16 +131,16 @@ double computed_value(const std::string& case_name, const std::string& key) {
     }
     if (case_name == "viterbi_accuracy_vs_true") return pipe.viterbi_accuracy;
     if (case_name == "momentum_unfiltered" || case_name == "momentum_filtered" ||
-        case_name == "carry_unfiltered" || case_name == "carry_filtered") {
-        const regime::Metrics& m = pipe.results.at(case_name).metrics;
-        if (key == "ann_return") return m.ann_return;
-        if (key == "sharpe") return m.sharpe;
-        if (key == "max_dd") return m.max_dd;
-    }
+        case_name == "carry_unfiltered" || case_name == "carry_filtered")
+        return metric_by_key(pipe.results.at(case_name).metrics, key);
     if (case_name == "combined_sharpe") {
         if (key == "sharpe_unfiltered") return pipe.combined.at("unfiltered").metrics.sharpe;
         if (key == "sharpe_filtered") return pipe.combined.at("filtered").metrics.sharpe;
+        if (key == "max_dd_unfiltered") return pipe.combined.at("unfiltered").metrics.max_dd;
+        if (key == "max_dd_filtered") return pipe.combined.at("filtered").metrics.max_dd;
     }
+    if (case_name == "carry_rerank_positions" || case_name == "carry_rerank_backtest")
+        return carry_rerank_value(inputs, key);
     if (case_name == "crisis_momentum_return")
         return pipe.crisis.at("momentum_unfiltered")[0].ann_return;
     if (case_name == "turnover_momentum" || case_name == "turnover_carry") {
@@ -94,13 +158,13 @@ double computed_value(const std::string& case_name, const std::string& key) {
 
 TEST(Golden, AllCasesMatchWithinTolerance) {
     const auto& cases = golden().at("cases").arr;
-    ASSERT_EQ(cases.size(), 18u);
+    ASSERT_EQ(cases.size(), 20u);
     int checked = 0;
     for (const auto& c : cases) {
         const std::string name = c.at("name").string();
         const double tol = c.at("tol").num();
         for (const auto& [key, expect] : c.at("expect").obj) {
-            const double got = computed_value(name, key);
+            const double got = computed_value(name, key, c.at("inputs"));
             if (tol == 0.0) {
                 EXPECT_EQ(got, expect.num()) << name << "." << key;
             } else {
@@ -109,7 +173,39 @@ TEST(Golden, AllCasesMatchWithinTolerance) {
             ++checked;
         }
     }
-    EXPECT_GE(checked, 40);  // 18 cases, several keys each
+    EXPECT_EQ(checked, 77);  // every scalar across the 20 cases
+}
+
+TEST(Golden, CarryRerankPanelReallyReranks) {
+    // The bundled differentials never cross; the embedded panel must.
+    const auto& cases = golden().at("cases").arr;
+    const mini_json::Value* rr = nullptr;
+    for (const auto& c : cases)
+        if (c.at("name").string() == "carry_rerank_positions") rr = &c;
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->at("tol").num(), 0.0);
+    const regime::Matrix panel = carry_rerank_panel(rr->at("inputs"));
+    EXPECT_EQ(panel.rows, 63u);
+    EXPECT_EQ(panel(9, 0), 0.04);
+    EXPECT_EQ(panel(10, 0), 0.01);
+    EXPECT_EQ(rr->at("expect").at("pos_day15_asset0").num(), 1.0);   // not yet rebalanced
+    EXPECT_EQ(rr->at("expect").at("pos_day21_asset0").num(), -1.0);  // flipped at day 21
+    EXPECT_EQ(rr->at("expect").at("turnover_day21").num(), 4.0);
+}
+
+TEST(Golden, ShorterRefitWindowAlsoRuns) {
+    // Tests are allowed a faster walk-forward loop: overriding the refit
+    // cadence must work and still produce a valid gate (golden values always
+    // use the bundled pinned config, checked above).
+    const regime::PipelineResult pipe =
+        regime::run_full_pipeline(regime_tests::data_dir(), 750, 1000);
+    for (std::size_t t = 0; t < 999; ++t) EXPECT_EQ(pipe.gate[t], 1.0);
+    for (double g : pipe.gate) {
+        EXPECT_GE(g, 0.0);
+        EXPECT_LE(g, 1.0);
+    }
+    EXPECT_EQ(pipe.config.refit_days, 750);
+    EXPECT_EQ(pipe.config.train_min_days, 1000);
 }
 
 TEST(Golden, SemanticInvariants) {
@@ -124,6 +220,8 @@ TEST(Golden, SemanticInvariants) {
               pipe.results.at("momentum_unfiltered").metrics.max_dd);
     EXPECT_LT(pipe.results.at("momentum_filtered").metrics.ann_return,
               pipe.results.at("momentum_unfiltered").metrics.ann_return);
+    EXPECT_GT(pipe.combined.at("filtered").metrics.max_dd,
+              pipe.combined.at("unfiltered").metrics.max_dd);
     // Stationary distribution sums to 1; Viterbi counts partition the sample.
     double pi_sum = 0.0;
     for (double x : pipe.stationary3) pi_sum += x;

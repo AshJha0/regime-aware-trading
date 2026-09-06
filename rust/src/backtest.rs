@@ -23,7 +23,8 @@ use crate::matrix::Matrix;
 pub const TRADING_DAYS: f64 = 252.0;
 
 /// Calendar date `YYYY-MM-DD` (only year/month matter for the metrics).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Field order gives the derived `Ord` chronological meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Date {
     /// Four-digit year.
     pub year: i32,
@@ -34,17 +35,80 @@ pub struct Date {
 }
 
 impl Date {
-    /// Parse a `YYYY-MM-DD` string.
+    /// Parse a `YYYY-MM-DD` string (exactly ten characters, month 1..=12,
+    /// day 1..=31; calendar validity beyond that is not checked).
+    ///
+    /// # Errors
+    /// `RegimeError::Data` on any malformed input.
     pub fn parse(s: &str) -> Result<Date> {
-        let parts: Vec<&str> = s.trim().split('-').collect();
-        if parts.len() != 3 {
-            return Err(RegimeError::Data(format!("bad date {s:?}")));
+        let bad = || RegimeError::Data(format!("bad date {s:?} (want YYYY-MM-DD)"));
+        let b = s.as_bytes();
+        if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+            return Err(bad());
         }
-        let year = parts[0].parse::<i32>().map_err(|_| RegimeError::Data(format!("bad date {s:?}")))?;
-        let month = parts[1].parse::<u32>().map_err(|_| RegimeError::Data(format!("bad date {s:?}")))?;
-        let day = parts[2].parse::<u32>().map_err(|_| RegimeError::Data(format!("bad date {s:?}")))?;
+        if [0, 1, 2, 3, 5, 6, 8, 9].iter().any(|&i| !b[i].is_ascii_digit()) {
+            return Err(bad());
+        }
+        let year = s[0..4].parse::<i32>().map_err(|_| bad())?;
+        let month = s[5..7].parse::<u32>().map_err(|_| bad())?;
+        let day = s[8..10].parse::<u32>().map_err(|_| bad())?;
+        Date::new(year, month, day)
+    }
+
+    /// Construct a date, rejecting month outside 1..=12 or day outside 1..=31.
+    ///
+    /// # Errors
+    /// `RegimeError::Data` on an out-of-range month or day.
+    pub fn new(year: i32, month: u32, day: u32) -> Result<Date> {
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return Err(RegimeError::Data(format!("bad date {year:04}-{month:02}-{day:02}")));
+        }
         Ok(Date { year, month, day })
     }
+
+    fn is_valid(&self) -> bool {
+        (1..=12).contains(&self.month) && (1..=31).contains(&self.day)
+    }
+}
+
+/// Pinned date checks (API_SPEC.md §2.1): length `T`, well-formed, strictly
+/// increasing.
+fn validate_dates(dates: &[Date], t_len: usize) -> Result<()> {
+    if dates.len() != t_len {
+        return Err(RegimeError::InvalidInput(format!(
+            "dates length {} does not match number of days {t_len}",
+            dates.len()
+        )));
+    }
+    for (t, d) in dates.iter().enumerate() {
+        if !d.is_valid() {
+            return Err(RegimeError::InvalidInput(format!("dates could not be parsed: {d} at t={t}")));
+        }
+        if t > 0 && dates[t - 1] >= *d {
+            return Err(RegimeError::InvalidInput(format!(
+                "dates must be strictly increasing (at t={t})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Pinned net-return checks: non-empty, finite, and `> -1` (a net return of
+/// -100 % or worse means the book is wiped out; API_SPEC.md §2).
+fn validate_net(net: &[f64]) -> Result<()> {
+    if net.is_empty() {
+        return Err(RegimeError::InvalidInput("net return series is empty".into()));
+    }
+    if net.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("net returns contain NaN or inf".into()));
+    }
+    if let Some(t) = net.iter().position(|&v| v <= -1.0) {
+        return Err(RegimeError::InvalidInput(format!(
+            "equity wiped out on day t={t}: net return {} <= -100%",
+            net[t]
+        )));
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for Date {
@@ -112,10 +176,16 @@ fn std_ddof0(xs: &[f64]) -> f64 {
 /// Maximum drawdown of an equity curve, as a non-positive fraction.
 ///
 /// # Errors
-/// Empty curve.
+/// Empty, non-finite or non-positive curve (a drawdown from or to a
+/// non-positive equity is undefined; `run_backtest` rejects wipe-outs first).
 pub fn max_drawdown(equity: &[f64]) -> Result<f64> {
     if equity.is_empty() {
         return Err(RegimeError::InvalidInput("equity curve is empty".into()));
+    }
+    if equity.iter().any(|&e| !e.is_finite() || e <= 0.0) {
+        return Err(RegimeError::InvalidInput(
+            "equity curve must be finite and strictly positive".into(),
+        ));
     }
     let mut peak = f64::NEG_INFINITY;
     let mut mdd = f64::INFINITY;
@@ -128,23 +198,18 @@ pub fn max_drawdown(equity: &[f64]) -> Result<f64> {
 
 /// Pinned summary metrics from a daily net-return series.
 ///
-/// With `dates`, `worst_month` compounds within calendar months; without,
-/// it uses consecutive 21-day blocks (any trailing partial block beyond
-/// `T/21` full blocks is ignored, matching the reference).
+/// With `dates` (strictly increasing), `worst_month` compounds within
+/// calendar months; without, it uses consecutive 21-day blocks (any
+/// trailing partial block beyond `T/21` full blocks is dropped — pinned,
+/// API_SPEC.md §2.1).
 ///
 /// # Errors
-/// Empty or non-finite series; `dates` length mismatch.
+/// Empty or non-finite series, a net return `<= -1` (wipe-out), or dates
+/// that are the wrong length, malformed or not strictly increasing.
 pub fn compute_metrics(net: &[f64], dates: Option<&[Date]>) -> Result<Metrics> {
-    if net.is_empty() {
-        return Err(RegimeError::InvalidInput("net return series is empty".into()));
-    }
-    if net.iter().any(|v| !v.is_finite()) {
-        return Err(RegimeError::InvalidInput("net returns contain NaN or inf".into()));
-    }
+    validate_net(net)?;
     if let Some(d) = dates {
-        if d.len() != net.len() {
-            return Err(RegimeError::InvalidInput("dates length does not match number of days".into()));
-        }
+        validate_dates(d, net.len())?;
     }
     let ann_ret = TRADING_DAYS * mean(net);
     let ann_vol = TRADING_DAYS.sqrt() * std_ddof0(net);
@@ -197,8 +262,9 @@ pub fn compute_metrics(net: &[f64], dates: Option<&[Date]>) -> Result<Metrics> {
 /// metrics.
 ///
 /// # Errors
-/// Shape mismatch, empty input, non-finite values, negative `cost_bps`,
-/// or a `dates` length mismatch.
+/// Shape mismatch, empty input (no days or no assets), non-finite values, a
+/// return `<= -1`, negative `cost_bps`, invalid `dates`, or a wipe-out
+/// (`net[t] <= -1` for some day; the message names `t`) — API_SPEC.md §2.
 pub fn run_backtest(
     positions: &Matrix,
     returns: &Matrix,
@@ -217,16 +283,27 @@ pub fn run_backtest(
     if positions.rows() == 0 {
         return Err(RegimeError::InvalidInput("empty backtest: no days".into()));
     }
+    if positions.cols() == 0 {
+        return Err(RegimeError::InvalidInput("empty backtest: no assets".into()));
+    }
     if !positions.all_finite() || !returns.all_finite() {
         return Err(RegimeError::InvalidInput("positions/returns contain NaN or inf".into()));
     }
-    if cost_bps < 0.0 {
+    for t in 0..returns.rows() {
+        for a in 0..returns.cols() {
+            if returns.get(t, a) <= -1.0 {
+                return Err(RegimeError::InvalidInput(format!(
+                    "returns contain a return <= -100% at t={t}, asset={a} ({})",
+                    returns.get(t, a)
+                )));
+            }
+        }
+    }
+    if !cost_bps.is_finite() || cost_bps < 0.0 {
         return Err(RegimeError::InvalidInput(format!("cost_bps must be >= 0, got {cost_bps}")));
     }
     if let Some(d) = dates {
-        if d.len() != positions.rows() {
-            return Err(RegimeError::InvalidInput("dates length does not match number of days".into()));
-        }
+        validate_dates(d, positions.rows())?;
     }
 
     let (t_len, n_assets) = (positions.rows(), positions.cols());
@@ -249,6 +326,7 @@ pub fn run_backtest(
     }
     let cost = cost_bps / 1e4;
     let net: Vec<f64> = gross.iter().zip(&turnover).map(|(g, to)| g - cost * to).collect();
+    validate_net(&net)?; // wipe-out guard: net[t] <= -1 is an error naming t
     let mut equity = Vec::with_capacity(t_len);
     let mut acc = 1.0;
     for &v in &net {
@@ -265,7 +343,9 @@ pub fn run_backtest(
 /// the day-t decoded state.  States with no days get all-zero stats.
 ///
 /// # Errors
-/// Length mismatch between `net` and `states`.
+/// Length mismatch between `net` and `states`, non-finite `net`,
+/// `n_states < 1`, or a label outside `[0, n_states)` (pinned: labels are
+/// never silently dropped).
 pub fn state_conditional_returns(
     net: &[f64],
     states: &[usize],
@@ -273,6 +353,19 @@ pub fn state_conditional_returns(
 ) -> Result<Vec<StateStats>> {
     if net.len() != states.len() {
         return Err(RegimeError::InvalidInput("net returns and states must have equal length".into()));
+    }
+    if net.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("net returns contain NaN or inf".into()));
+    }
+    if n_states < 1 {
+        return Err(RegimeError::InvalidInput(format!(
+            "n_states must be an integer >= 1, got {n_states}"
+        )));
+    }
+    if states.iter().any(|&s| s >= n_states) {
+        return Err(RegimeError::InvalidInput(format!(
+            "state labels must be integers in [0, {n_states})"
+        )));
     }
     let mut out = Vec::with_capacity(n_states);
     for k in 0..n_states {

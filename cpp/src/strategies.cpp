@@ -18,12 +18,24 @@ namespace {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
-/// Validate a (T x A) return-like matrix: non-empty and all finite.
-void validate_matrix(const Matrix& r, const char* name) {
+/// Validate a (T x A) return-like matrix: non-empty and all finite.  With
+/// simple_returns (pinned, API_SPEC 3) every entry must also be > -1: a
+/// -100 % (or worse) day is corrupt data and would make every trailing
+/// growth ratio 0/0.
+void validate_matrix(const Matrix& r, const char* name, bool simple_returns = false) {
     if (r.rows == 0 || r.cols == 0)
         throw std::invalid_argument(std::string(name) + " must be a non-empty 2-D array");
+    if (r.data.size() != r.rows * r.cols)
+        throw std::invalid_argument(std::string(name) + " storage does not match its shape");
     for (double v : r.data)
         if (!std::isfinite(v)) throw std::invalid_argument(std::string(name) + " contain NaN or inf");
+    if (simple_returns)
+        for (std::size_t t = 0; t < r.rows; ++t)
+            for (std::size_t a = 0; a < r.cols; ++a)
+                if (r(t, a) <= -1.0)
+                    throw std::invalid_argument(std::string(name) + " contain a return <= -100% at t=" +
+                                                std::to_string(t) + ", asset=" + std::to_string(a) +
+                                                " (" + std::to_string(r(t, a)) + ")");
 }
 
 /// sign(x) in {-1, 0, +1}.
@@ -32,7 +44,7 @@ double sign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 }  // namespace
 
 Matrix ewma_variance(const Matrix& returns, double lam, int init_window) {
-    validate_matrix(returns, "returns");
+    validate_matrix(returns, "returns", /*simple_returns=*/true);
     const std::size_t T = returns.rows, A = returns.cols;
     if (!(lam > 0.0 && lam < 1.0))
         throw std::invalid_argument("ewma lambda must be in (0, 1), got " + std::to_string(lam));
@@ -54,7 +66,7 @@ Matrix ewma_variance(const Matrix& returns, double lam, int init_window) {
 
 Matrix momentum_positions(const Matrix& returns, int lookback, double vol_target,
                           double ewma_lambda, double leverage_cap) {
-    validate_matrix(returns, "returns");
+    validate_matrix(returns, "returns", /*simple_returns=*/true);
     const std::size_t T = returns.rows, A = returns.cols;
     if (lookback < 1)
         throw std::invalid_argument("lookback must be >= 1, got " + std::to_string(lookback));
@@ -127,7 +139,7 @@ Matrix carry_positions(const Matrix& rate_diffs, int top_n, int bottom_n,
 }
 
 Matrix carry_total_returns(const Matrix& spot_returns, const Matrix& rate_diffs) {
-    validate_matrix(spot_returns, "spot returns");
+    validate_matrix(spot_returns, "spot returns", /*simple_returns=*/true);
     validate_matrix(rate_diffs, "rate differentials");
     if (spot_returns.rows != rate_diffs.rows || spot_returns.cols != rate_diffs.cols)
         throw std::invalid_argument("spot returns and differentials must have equal shape");
@@ -145,6 +157,11 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
         if (!std::isfinite(v)) throw std::invalid_argument("index_returns contain NaN or inf");
     if (mode != "prob" && mode != "binary")
         throw std::invalid_argument("gate mode must be 'prob' or 'binary', got '" + mode + "'");
+    if (!(threshold >= 0.0 && threshold <= 1.0))
+        throw std::invalid_argument("gate threshold must be in [0, 1], got " +
+                                    std::to_string(threshold));
+    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
+    GaussianHMM(n_states, tol, max_iter, var_floor);
     const std::size_t T = index_returns.size();
     if (train_min_days <= n_states || refit_days < 1)
         throw std::invalid_argument(
@@ -163,22 +180,32 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
             GaussianHMM model(n_states, tol, max_iter, var_floor);
             Matrix window(t + 1, 1);
             for (std::size_t u = 0; u <= t; ++u) window(u, 0) = index_returns[u];
-            if (out.models.empty()) {
-                model.fit(window);
-            } else {
-                model.fit(window, out.models.back().params());  // warm start
+            try {
+                if (out.models.empty()) {
+                    model.fit(window);
+                } else {
+                    model.fit(window, out.models.back().params());  // warm start
+                }
+                Matrix filt = model.filtered_probabilities(window);
+                alpha.assign(filt.cols, 0.0);
+                for (std::size_t k = 0; k < filt.cols; ++k) alpha[k] = filt(t, k);
+            } catch (const std::invalid_argument& e) {
+                throw std::invalid_argument("regime_gate refit at t=" + std::to_string(t) + ": " +
+                                            e.what());
             }
             // Pinned gate state: lowest variance on dimension 0 (ties -> lower label).
             const Matrix& vars = model.params().variances;
             calm_state = 0;
             for (std::size_t k = 1; k < vars.rows; ++k)
                 if (vars(k, 0) < vars(calm_state, 0)) calm_state = k;
-            Matrix filt = model.filtered_probabilities(window);
-            alpha.assign(filt.cols, 0.0);
-            for (std::size_t k = 0; k < filt.cols; ++k) alpha[k] = filt(t, k);
             out.models.push_back(std::move(model));
         } else {
-            alpha = forward_step(out.models.back().params(), alpha, {index_returns[t]});
+            try {
+                alpha = forward_step(out.models.back().params(), alpha, {index_returns[t]});
+            } catch (const std::invalid_argument& e) {
+                throw std::invalid_argument("regime_gate forward step at t=" + std::to_string(t) +
+                                            ": " + e.what());
+            }
         }
         const double p_calm = alpha[calm_state];
         out.gate[t] = mode == "prob" ? p_calm : (p_calm >= threshold ? 1.0 : 0.0);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every *Test class with JUnitCore. Must be run from java/ (build.sh first).
+# Run every *Test class with JUnitCore (bash test.sh from java/, after bash build.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
 
