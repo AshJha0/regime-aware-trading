@@ -280,6 +280,18 @@
         "max_dd": -0.003306364932108563
       },
       "tol": 1e-08
+    },
+    {
+      "name": "gate_band_0p3",
+      "inputs": {
+        "gate_band": 0.3
+      },
+      "expect": {
+        "mean_turnover_momentum": 0.02625190521867839,
+        "mean_turnover_carry": 0.026479190865591598,
+        "sharpe_combined": 2.0290749903226257
+      },
+      "tol": 1e-08
     }
   ]
 }

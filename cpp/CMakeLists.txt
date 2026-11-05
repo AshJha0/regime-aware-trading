@@ -23,6 +23,11 @@ add_executable(demo src/demo.cpp)
 target_link_libraries(demo PRIVATE regime)
 target_compile_definitions(demo PRIVATE REGIME_DATA_DIR="${REGIME_DATA_DIR}")
 
+# Filter benchmark (run it from a Release build) ---------------------------
+add_executable(bench_filter src/bench_filter.cpp)
+target_link_libraries(bench_filter PRIVATE regime)
+target_compile_definitions(bench_filter PRIVATE REGIME_DATA_DIR="${REGIME_DATA_DIR}")
+
 # Tests -----------------------------------------------------------------
 enable_testing()
 find_package(GTest REQUIRED)
@@ -31,6 +36,7 @@ add_executable(regime_tests
     tests/test_strategies.cpp
     tests/test_backtest.cpp
     tests/test_golden.cpp
+    tests/test_filter_alloc.cpp
 )
 target_link_libraries(regime_tests PRIVATE regime GTest::gtest GTest::gtest_main)
 target_compile_definitions(regime_tests PRIVATE REGIME_DATA_DIR="${REGIME_DATA_DIR}")

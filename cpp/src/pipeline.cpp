@@ -108,6 +108,11 @@ PipelineConfig load_config(const std::string& path) {
     c.gate_threshold = json_number(text, "gate_threshold");
     c.cost_bps = json_number(text, "cost_bps");
     c.trading_days = json_int(text, "trading_days");
+    // Optional keys (API_SPEC 4): absent means 0, which is off.
+    if (text.find("\"gate_band\"") != std::string::npos)
+        c.gate_band = json_number(text, "gate_band");
+    if (text.find("\"transition_floor\"") != std::string::npos)
+        c.transition_floor = json_number(text, "transition_floor");
     return c;
 }
 
@@ -173,6 +178,31 @@ Dataset load_dataset(const std::string& data_dir) {
     return ds;
 }
 
+GateBandValues gate_band_values(const PipelineResult& pipe, double band) {
+    const Dataset& ds = pipe.dataset;
+    const PipelineConfig& cfg = pipe.config;
+    const std::vector<double> gate = apply_gate_band(pipe.gate, band);
+    const Matrix mom_pos = momentum_positions(ds.trend_returns, cfg.momentum_lookback,
+                                              cfg.vol_target, cfg.ewma_lambda, cfg.leverage_cap);
+    const Matrix carry_pos = carry_positions(ds.fx_rate_diffs, cfg.carry_top_n,
+                                             cfg.carry_bottom_n, cfg.rebalance_days);
+    const Matrix carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs);
+    const std::vector<std::string>* dates = &ds.dates;
+    const BacktestResult mom =
+        run_backtest(apply_gate(mom_pos, gate), ds.trend_returns, cfg.cost_bps, dates);
+    const BacktestResult carry =
+        run_backtest(apply_gate(carry_pos, gate), carry_rets, cfg.cost_bps, dates);
+    std::vector<double> net(mom.net_returns.size());
+    for (std::size_t t = 0; t < net.size(); ++t)
+        net[t] = 0.5 * mom.net_returns[t] + 0.5 * carry.net_returns[t];
+    const auto mean = [](const std::vector<double>& v) {
+        double s = 0.0;
+        for (double x : v) s += x;
+        return s / static_cast<double>(v.size());
+    };
+    return {mean(mom.turnover), mean(carry.turnover), compute_metrics(net, dates).sharpe};
+}
+
 PipelineResult run_full_pipeline(const std::string& data_dir) {
     return run_full_pipeline(data_dir, std::nullopt, std::nullopt);
 }
@@ -219,7 +249,8 @@ PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int>
     // Walk-forward regime gate on the index (no lookahead).
     RegimeGateResult gate_res =
         regime_gate(ds.index_returns, K, cfg.train_min_days, cfg.refit_days, cfg.gate_mode,
-                    cfg.gate_threshold, cfg.em_tol, cfg.em_max_iter, cfg.var_floor);
+                    cfg.gate_threshold, cfg.em_tol, cfg.em_max_iter, cfg.var_floor,
+                    cfg.gate_band, cfg.transition_floor);
 
     const double cost = cfg.cost_bps;
 

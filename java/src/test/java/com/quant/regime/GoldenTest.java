@@ -23,6 +23,7 @@ public class GoldenTest {
         HmmParams p3 = pipe.hmm3().params();
         Map<String, Map<String, Double>> out = new LinkedHashMap<>();
 
+        out.put("gate_band_0p3", Pipeline.gateBandValues(pipe, 0.3));
         out.put("hmm_k2_loglik", Map.of("loglik", pipe.fit2().logLikelihood()));
         out.put("hmm_k3_loglik", Map.of("loglik", pipe.fit3().logLikelihood()));
         Map<String, Double> means = new LinkedHashMap<>();
@@ -157,18 +158,18 @@ public class GoldenTest {
     @Test
     public void goldenFileHasExpectedCases() {
         List<?> cases = TestData.goldenCases();
-        assertEquals(20, cases.size());
+        assertEquals(21, cases.size());
         Set<String> names = new HashSet<>();
         for (Object c : cases) {
             names.add((String) ((Map<?, ?>) c).get("name"));
         }
-        assertEquals(20, names.size());
+        assertEquals(21, names.size());
         for (String required : new String[] {"hmm_k2_loglik", "hmm_k3_loglik", "hmm_k3_means",
                 "hmm_k3_stds", "hmm_k3_transmat", "hmm_k3_viterbi_counts", "hmm_k3_stationary",
                 "hmm_k3_smoothed_t500", "hmm_k3_smoothed_t1500", "viterbi_accuracy_vs_true",
                 "momentum_unfiltered", "momentum_filtered", "carry_unfiltered", "carry_filtered",
                 "combined_sharpe", "crisis_momentum_return", "turnover_momentum", "turnover_carry",
-                "carry_rerank_positions", "carry_rerank_backtest"}) {
+                "carry_rerank_positions", "carry_rerank_backtest", "gate_band_0p3"}) {
             assertTrue("missing golden case " + required, names.contains(required));
         }
         for (String name : new String[] {"momentum_unfiltered", "momentum_filtered",
@@ -220,7 +221,7 @@ public class GoldenTest {
                 checked++;
             }
         }
-        assertEquals("every scalar across the 20 cases", 77, checked);
+        assertEquals("every scalar across the 21 cases", 80, checked);
     }
 
     @Test

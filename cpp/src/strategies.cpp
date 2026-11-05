@@ -150,18 +150,40 @@ Matrix carry_total_returns(const Matrix& spot_returns, const Matrix& rate_diffs)
     return total;
 }
 
+std::vector<double> apply_gate_band(const std::vector<double>& gate, double band) {
+    if (!(band >= 0.0 && band <= 1.0))
+        throw std::invalid_argument("gate_band must be in [0, 1], got " + std::to_string(band));
+    std::vector<double> out(gate.size());
+    double held = 1.0;
+    for (std::size_t t = 0; t < gate.size(); ++t) {
+        if (!std::isfinite(gate[t])) throw std::invalid_argument("gate contains NaN or inf");
+        if (std::abs(gate[t] - held) > band) held = gate[t];
+        out[t] = held;
+    }
+    return out;
+}
+
 RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_states,
                              int train_min_days, int refit_days, const std::string& mode,
-                             double threshold, double tol, int max_iter, double var_floor) {
+                             double threshold, double tol, int max_iter, double var_floor,
+                             double gate_band, double transition_floor) {
     for (double v : index_returns)
         if (!std::isfinite(v)) throw std::invalid_argument("index_returns contain NaN or inf");
+    for (std::size_t t = 0; t < index_returns.size(); ++t)
+        if (index_returns[t] <= -1.0)
+            throw std::invalid_argument("index_returns contain a return <= -100% at t=" +
+                                        std::to_string(t) + " (" +
+                                        std::to_string(index_returns[t]) + ")");
     if (mode != "prob" && mode != "binary")
         throw std::invalid_argument("gate mode must be 'prob' or 'binary', got '" + mode + "'");
     if (!(threshold >= 0.0 && threshold <= 1.0))
         throw std::invalid_argument("gate threshold must be in [0, 1], got " +
                                     std::to_string(threshold));
-    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
-    GaussianHMM(n_states, tol, max_iter, var_floor);
+    if (!(gate_band >= 0.0 && gate_band <= 1.0))
+        throw std::invalid_argument("gate_band must be in [0, 1], got " +
+                                    std::to_string(gate_band));
+    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
+    GaussianHMM(n_states, tol, max_iter, var_floor, transition_floor);
     const std::size_t T = index_returns.size();
     if (train_min_days <= n_states || refit_days < 1)
         throw std::invalid_argument(
@@ -177,7 +199,7 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
     std::size_t calm_state = 0;
     for (std::size_t t = t0; t < T; ++t) {
         if ((t - t0) % static_cast<std::size_t>(refit_days) == 0) {
-            GaussianHMM model(n_states, tol, max_iter, var_floor);
+            GaussianHMM model(n_states, tol, max_iter, var_floor, transition_floor);
             Matrix window(t + 1, 1);
             for (std::size_t u = 0; u <= t; ++u) window(u, 0) = index_returns[u];
             try {
@@ -210,6 +232,7 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
         const double p_calm = alpha[calm_state];
         out.gate[t] = mode == "prob" ? p_calm : (p_calm >= threshold ? 1.0 : 0.0);
     }
+    out.gate = apply_gate_band(out.gate, gate_band);
     return out;
 }
 

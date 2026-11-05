@@ -141,6 +141,13 @@ double computed_value(const std::string& case_name, const std::string& key,
     }
     if (case_name == "carry_rerank_positions" || case_name == "carry_rerank_backtest")
         return carry_rerank_value(inputs, key);
+    if (case_name == "gate_band_0p3") {
+        const regime::GateBandValues v =
+            regime::gate_band_values(pipe, inputs.at("gate_band").num());
+        if (key == "mean_turnover_momentum") return v.mean_turnover_momentum;
+        if (key == "mean_turnover_carry") return v.mean_turnover_carry;
+        if (key == "sharpe_combined") return v.sharpe_combined;
+    }
     if (case_name == "crisis_momentum_return")
         return pipe.crisis.at("momentum_unfiltered")[0].ann_return;
     if (case_name == "turnover_momentum" || case_name == "turnover_carry") {
@@ -158,7 +165,7 @@ double computed_value(const std::string& case_name, const std::string& key,
 
 TEST(Golden, AllCasesMatchWithinTolerance) {
     const auto& cases = golden().at("cases").arr;
-    ASSERT_EQ(cases.size(), 20u);
+    ASSERT_EQ(cases.size(), 21u);
     int checked = 0;
     for (const auto& c : cases) {
         const std::string name = c.at("name").string();
@@ -173,7 +180,7 @@ TEST(Golden, AllCasesMatchWithinTolerance) {
             ++checked;
         }
     }
-    EXPECT_EQ(checked, 77);  // every scalar across the 20 cases
+    EXPECT_EQ(checked, 80);  // every scalar across the 21 cases
 }
 
 TEST(Golden, CarryRerankPanelReallyReranks) {

@@ -252,6 +252,56 @@ def validate_params(params: HMMParams, n_states: int, n_dims: int) -> HMMParams:
     return HMMParams(sp, A, mu, var)
 
 
+def _validate_transition_floor(floor: float) -> None:
+    if not (np.isfinite(floor) and floor >= 0.0):
+        raise ValueError(f"transition_floor must be finite and >= 0, got {floor}")
+
+
+def apply_transition_floor(transmat: np.ndarray, floor: float) -> np.ndarray:
+    """Add ``floor`` to every transition entry and renormalise the rows.
+
+    Baum-Welch multiplies the old ``A_ij`` into the new one, so an entry at
+    or near zero can never recover.  This is the warm-start remedy (API_SPEC
+    1.3).  ``floor == 0`` returns an exact copy, bit for bit.
+
+    Args:
+        transmat: Row-stochastic matrix, shape ``(K, K)``.
+        floor: Finite value ``>= 0``.
+
+    Returns:
+        A new row-stochastic matrix.
+
+    Raises:
+        ValueError: If ``floor`` is negative or non-finite.
+    """
+    _validate_transition_floor(floor)
+    A = np.array(transmat, dtype=float)
+    if floor == 0.0:
+        return A
+    A = A + floor
+    return A / A.sum(axis=1, keepdims=True)
+
+
+def _validate_alpha(alpha_prev: np.ndarray, K: int) -> np.ndarray:
+    """Check a filtered posterior: length K, finite, non-negative, sums to 1."""
+    alpha = np.asarray(alpha_prev, dtype=float)
+    if alpha.ndim != 1 or alpha.shape[0] != K:
+        raise ValueError(f"alpha_prev length {alpha.shape} does not match n_states={K}")
+    if not np.all(np.isfinite(alpha)) or np.any(alpha < 0.0) or abs(float(alpha.sum()) - 1.0) > STOCHASTIC_TOL:
+        raise ValueError("alpha_prev must be finite, non-negative and sum to 1")
+    return alpha
+
+
+def _validate_observation(x_t: np.ndarray, D: int) -> np.ndarray:
+    """Check one observation: scalar or length D, finite."""
+    x = np.atleast_1d(np.asarray(x_t, dtype=float))
+    if x.ndim != 1 or x.shape[0] != D:
+        raise ValueError(f"observation length {x.shape} does not match D={D}")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("observation contains NaN or inf")
+    return x
+
+
 class GaussianHMM:
     """Diagonal-covariance Gaussian HMM with deterministic Baum-Welch EM.
 
@@ -262,6 +312,9 @@ class GaussianHMM:
         max_iter: Maximum number of EM iterations.
         var_floor: Lower bound applied to every variance after each update
             (guards zero-variance states when K exceeds the data support).
+        transition_floor: Added to each transition entry of a warm-start
+            ``init`` before EM, rows renormalised (API_SPEC 1.3).  Ignored
+            on a cold start.  Default 0 (off).
     """
 
     def __init__(
@@ -270,15 +323,18 @@ class GaussianHMM:
         tol: float = 1e-8,
         max_iter: int = 500,
         var_floor: float = 1e-8,
+        transition_floor: float = 0.0,
     ) -> None:
         if int(n_states) != n_states or n_states < 2:
             raise ValueError(f"n_states must be an integer >= 2 (K=1 is degenerate), got {n_states}")
         if tol <= 0 or max_iter < 1 or var_floor <= 0:
             raise ValueError("tol and var_floor must be > 0 and max_iter >= 1")
+        _validate_transition_floor(transition_floor)
         self.n_states = int(n_states)
         self.tol = float(tol)
         self.max_iter = int(max_iter)
         self.var_floor = float(var_floor)
+        self.transition_floor = float(transition_floor)
         self.params: Optional[HMMParams] = None
         self.fit_result: Optional[HMMFitResult] = None
 
@@ -510,6 +566,7 @@ class GaussianHMM:
             raise ValueError(f"need more observations than states: T={T}, K={self.n_states}")
         if init is not None:
             params = validate_params(init, self.n_states, D).copy()
+            params.transmat = apply_transition_floor(params.transmat, self.transition_floor)
         else:
             params = self.pinned_init(X)
 
@@ -616,16 +673,8 @@ def forward_step(
     K = int(np.asarray(params.startprob).shape[0]) if np.ndim(params.startprob) == 1 else -1
     D = int(np.asarray(params.means).shape[1]) if np.ndim(params.means) == 2 else -1
     params = validate_params(params, K, D)
-    alpha = np.asarray(alpha_prev, dtype=float)
-    if alpha.ndim != 1 or alpha.shape[0] != K:
-        raise ValueError(f"alpha_prev length {alpha.shape} does not match n_states={K}")
-    if not np.all(np.isfinite(alpha)) or np.any(alpha < 0.0) or abs(float(alpha.sum()) - 1.0) > STOCHASTIC_TOL:
-        raise ValueError("alpha_prev must be finite, non-negative and sum to 1")
-    x = np.atleast_1d(np.asarray(x_t, dtype=float))
-    if x.ndim != 1 or x.shape[0] != D:
-        raise ValueError(f"observation length {x.shape} does not match D={D}")
-    if not np.all(np.isfinite(x)):
-        raise ValueError("observation contains NaN or inf")
+    alpha = _validate_alpha(alpha_prev, K)
+    x = _validate_observation(x_t, D)
     x = x[None, :]
     diff = x[:, None, :] - params.means[None, :, :]
     v = params.variances[None, :, :]
@@ -638,3 +687,84 @@ def forward_step(
             "forward step: the observation has zero likelihood under every reachable state"
         )
     return a / total
+
+
+class RegimeFilter:
+    """Streaming filter: :func:`forward_step` with the set-up paid once.
+
+    The parameters are validated and copied at construction and the
+    log-variance terms precomputed, so :meth:`update` checks only the
+    observation (API_SPEC 1.10).  The C++ and Rust ports allocate nothing in
+    ``update``; this class exists here for API parity and is not fast.
+
+    With ``alpha_prev`` given, the first update equals
+    ``forward_step(params, alpha_prev, x)``.  Without it the first update
+    applies ``startprob`` with no transition, so a run over a series
+    reproduces :meth:`GaussianHMM.filtered_probabilities`.
+
+    Args:
+        params: HMM parameters (K from ``startprob``, D from ``means``).
+        alpha_prev: Optional filtered posterior at t-1, shape ``(K,)``.
+
+    Raises:
+        ValueError: On invalid parameters or an invalid ``alpha_prev``.
+    """
+
+    def __init__(self, params: HMMParams, alpha_prev: Optional[np.ndarray] = None) -> None:
+        if params is None:
+            raise ValueError("parameter set is None")
+        K = int(np.asarray(params.startprob).shape[0]) if np.ndim(params.startprob) == 1 else -1
+        D = int(np.asarray(params.means).shape[1]) if np.ndim(params.means) == 2 else -1
+        p = validate_params(params, K, D).copy()
+        if D < 1:
+            raise ValueError("means must have at least one dimension")
+        self.n_states = K
+        self.n_dims = D
+        self._startprob = p.startprob
+        self._transmat = p.transmat
+        self._means = p.means
+        self._variances = p.variances
+        self._log_const = np.sum(_LOG_2PI + np.log(p.variances), axis=1)  # (K,)
+        self.reset(alpha_prev)
+
+    def reset(self, alpha_prev: Optional[np.ndarray] = None) -> None:
+        """Restart the filter, from ``alpha_prev`` when given (validated)."""
+        if alpha_prev is None:
+            self._alpha = self._startprob.copy()
+            self._started = False
+        else:
+            self._alpha = _validate_alpha(alpha_prev, self.n_states).copy()
+            self._started = True
+
+    @property
+    def alpha(self) -> np.ndarray:
+        """Current filtered posterior (``startprob`` before any update)."""
+        return self._alpha.copy()
+
+    @property
+    def started(self) -> bool:
+        """True once there is a filtered posterior to transition from."""
+        return self._started
+
+    def update(self, x_t: np.ndarray) -> np.ndarray:
+        """Advance one observation and return ``P(s_t | x_1..t)``.
+
+        Raises:
+            ValueError: If ``x_t`` is not length D and finite, or has zero
+                likelihood under every reachable state.  The filter state
+                is then unchanged.
+        """
+        x = _validate_observation(x_t, self.n_dims)
+        diff = x[None, :] - self._means
+        logb = -0.5 * (self._log_const + np.sum(diff * diff / self._variances, axis=1))
+        bt = np.exp(logb - logb.max())
+        prior = self._alpha @ self._transmat if self._started else self._alpha
+        a = prior * bt
+        total = a.sum()
+        if not total > 0.0:
+            raise ValueError(
+                "forward step: the observation has zero likelihood under every reachable state"
+            )
+        self._alpha = a / total
+        self._started = True
+        return self._alpha.copy()

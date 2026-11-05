@@ -516,3 +516,154 @@ fn stationary_distribution_reports_nonconvergence() {
         assert!((v - 1.0 / 3.0).abs() < 1e-10);
     }
 }
+
+// Warm-start transition floor (API_SPEC 1.3).
+
+fn revival_series() -> Matrix {
+    let x: Vec<f64> = (0..200i32)
+        .map(|t| (if (t / 10) % 2 == 0 { 1.0 } else { -1.0 }) + f64::from((t * 7) % 5 - 2) * 0.05)
+        .collect();
+    Matrix::column(&x)
+}
+
+fn two_state(a: [f64; 4]) -> HmmParams {
+    HmmParams {
+        startprob: vec![0.5, 0.5],
+        transmat: Matrix::from_vec(2, 2, a.to_vec()).unwrap(),
+        means: Matrix::from_vec(2, 1, vec![-1.0, 1.0]).unwrap(),
+        variances: Matrix::from_vec(2, 1, vec![0.25, 0.25]).unwrap(),
+    }
+}
+
+#[test]
+fn apply_transition_floor_by_hand() {
+    let a = two_state([1.0, 0.0, 0.5, 0.5]).transmat;
+    let out = regime::apply_transition_floor(&a, 0.1).unwrap();
+    assert!((out.get(0, 0) - 1.1 / 1.2).abs() < 1e-15);
+    assert!((out.get(0, 1) - 0.1 / 1.2).abs() < 1e-15);
+    assert!((out.get(1, 0) - 0.5).abs() < 1e-15);
+    assert_eq!(regime::apply_transition_floor(&a, 0.0).unwrap(), a);
+}
+
+#[test]
+fn transition_floor_is_validated() {
+    let a = two_state([1.0, 0.0, 0.5, 0.5]).transmat;
+    for f in [-1e-9, f64::NAN, f64::INFINITY] {
+        assert!(regime::apply_transition_floor(&a, f).is_err());
+        assert!(GaussianHmm::with_defaults(2).unwrap().with_transition_floor(f).is_err());
+    }
+}
+
+#[test]
+fn zero_transition_stays_dead_without_the_floor_and_revives_with_it() {
+    let x = revival_series();
+    let init = two_state([1.0, 0.0, 0.5, 0.5]);
+    let mut off = GaussianHmm::with_defaults(2).unwrap();
+    let r_off = off.fit(&x, Some(&init)).unwrap();
+    assert_eq!(off.params().unwrap().transmat.get(0, 1), 0.0);
+    let mut on = GaussianHmm::with_defaults(2).unwrap().with_transition_floor(1e-3).unwrap();
+    let r_on = on.fit(&x, Some(&init)).unwrap();
+    assert!(on.params().unwrap().transmat.get(0, 1) > 0.05);
+    assert!(r_on.log_likelihood > r_off.log_likelihood);
+}
+
+fn index_series() -> Vec<f64> {
+    regime::load_dataset("../data").unwrap().index_returns
+}
+
+#[test]
+fn transition_floor_is_ignored_on_a_cold_start() {
+    let r = Matrix::column(&index_series()[..300]);
+    let mut plain = GaussianHmm::with_defaults(2).unwrap();
+    plain.fit(&r, None).unwrap();
+    let mut floored = GaussianHmm::with_defaults(2).unwrap().with_transition_floor(0.01).unwrap();
+    floored.fit(&r, None).unwrap();
+    assert_eq!(plain.params().unwrap().transmat, floored.params().unwrap().transmat);
+}
+
+// Streaming filter (API_SPEC 1.10).
+
+fn fitted_k3(r: &[f64]) -> GaussianHmm {
+    let mut m = GaussianHmm::with_defaults(3).unwrap();
+    m.fit(&Matrix::column(&r[..600]), None).unwrap();
+    m
+}
+
+fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+}
+
+#[test]
+fn regime_filter_equals_forward_step() {
+    let r = index_series();
+    let m = fitted_k3(&r);
+    let p = m.params().unwrap();
+    let mut alpha = vec![0.2, 0.3, 0.5];
+    let mut filt = regime::RegimeFilter::new(p, Some(&alpha)).unwrap();
+    for &x in &r {
+        alpha = forward_step(p, &alpha, &[x]).unwrap();
+        assert!(max_abs_diff(filt.update(&[x]).unwrap(), &alpha) <= 1e-12);
+    }
+}
+
+#[test]
+fn regime_filter_from_start_equals_filtered_probabilities() {
+    let r = index_series();
+    let m = fitted_k3(&r);
+    let want = m.filtered_probabilities(&Matrix::column(&r)).unwrap();
+    let mut filt = regime::RegimeFilter::new(m.params().unwrap(), None).unwrap();
+    assert!(!filt.started());
+    for (t, &x) in r.iter().enumerate() {
+        assert!(max_abs_diff(filt.update(&[x]).unwrap(), want.row(t)) <= 1e-12);
+    }
+    assert!(filt.started());
+}
+
+#[test]
+fn regime_filter_two_dimensional_matches_forward_step() {
+    let p = HmmParams {
+        startprob: vec![0.5, 0.5],
+        transmat: Matrix::from_vec(2, 2, vec![0.9, 0.1, 0.2, 0.8]).unwrap(),
+        means: Matrix::from_vec(2, 2, vec![0.0, 1.0, 1.0, -1.0]).unwrap(),
+        variances: Matrix::from_vec(2, 2, vec![1.0, 0.5, 2.0, 0.25]).unwrap(),
+    };
+    let mut alpha = vec![0.5, 0.5];
+    let mut filt = regime::RegimeFilter::new(&p, Some(&alpha)).unwrap();
+    for t in 0..50 {
+        let x = [f64::from(t).sin(), (0.5 * f64::from(t)).cos()];
+        alpha = forward_step(&p, &alpha, &x).unwrap();
+        assert!(max_abs_diff(filt.update(&x).unwrap(), &alpha) <= 1e-12);
+    }
+}
+
+#[test]
+fn regime_filter_reset() {
+    let r = index_series();
+    let m = fitted_k3(&r);
+    let p = m.params().unwrap();
+    let mut filt = regime::RegimeFilter::new(p, None).unwrap();
+    let first = filt.update(&[0.001]).unwrap().to_vec();
+    filt.reset(None).unwrap();
+    assert_eq!(filt.alpha(), p.startprob.as_slice());
+    assert_eq!(filt.update(&[0.001]).unwrap(), first.as_slice());
+}
+
+#[test]
+fn regime_filter_validation_and_failed_update_keeps_state() {
+    let mut p = two_state([1.0, 0.0, 0.0, 1.0]);
+    p.startprob = vec![1.0, 0.0];
+    p.means = Matrix::from_vec(2, 1, vec![0.0, 1.0]).unwrap();
+    p.variances = Matrix::from_vec(2, 1, vec![1.0, 1.0]).unwrap();
+    assert!(regime::RegimeFilter::new(&p, Some(&[0.7, 0.7])).is_err());
+    assert!(regime::RegimeFilter::new(&p, Some(&[1.0])).is_err());
+    let mut bad = p.clone();
+    bad.variances = Matrix::from_vec(2, 1, vec![1.0, 0.0]).unwrap();
+    assert!(regime::RegimeFilter::new(&bad, None).is_err());
+    let mut filt = regime::RegimeFilter::new(&p, None).unwrap();
+    assert!(filt.update(&[f64::NAN]).is_err());
+    assert!(filt.update(&[0.0, 1.0]).is_err());
+    let err = filt.update(&[1e4]).unwrap_err(); // zero normalizer
+    assert!(err.to_string().contains("zero likelihood"));
+    assert!(!filt.started());
+    assert_eq!(filt.alpha(), p.startprob.as_slice());
+}

@@ -26,15 +26,16 @@ pub use backtest::{
 };
 pub use error::{RegimeError, Result};
 pub use hmm::{
-    em_step_status, forward_step, validate_params, EmStep, GaussianHmm, HmmFitResult, HmmParams,
-    DEAD_STATE_SUPPORT, MONOTONE_REL_TOL, STOCHASTIC_TOL,
+    apply_transition_floor, em_step_status, forward_step, validate_params, EmStep, GaussianHmm,
+    HmmFitResult, HmmParams, RegimeFilter, DEAD_STATE_SUPPORT, MONOTONE_REL_TOL, STOCHASTIC_TOL,
 };
 pub use matrix::Matrix;
 pub use pipeline::{
-    carry_rerank_panel, carry_rerank_values, golden_values, load_dataset, run_full_pipeline,
+    carry_rerank_panel, carry_rerank_values, gate_band_values, golden_values, load_dataset,
+    run_full_pipeline,
     CarryRerankInputs, Config, Dataset, PipelineOutput,
 };
 pub use strategies::{
-    apply_gate, carry_positions, carry_total_returns, ewma_variance, momentum_positions,
-    regime_gate,
+    apply_gate, apply_gate_band, carry_positions, carry_total_returns, ewma_variance,
+    momentum_positions, regime_gate, regime_gate_with, GateOptions,
 };

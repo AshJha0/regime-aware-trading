@@ -310,3 +310,66 @@ fn regime_gate_parameter_validation() {
     nan.push(f64::NAN);
     assert!(regime_gate(&nan, 3, 400, 63, "prob", 0.5, 1e-8, 500, 1e-8).is_err());
 }
+
+// No-trade band and the regime_gate return domain.
+
+#[test]
+fn gate_band_recursion_by_hand() {
+    let g = [1.0, 0.8, 0.6, 0.65, 0.2, 0.45, 0.51];
+    assert_eq!(regime::apply_gate_band(&g, 0.3).unwrap(), vec![1.0, 1.0, 0.6, 0.6, 0.2, 0.2, 0.51]);
+}
+
+#[test]
+fn gate_band_is_strict_at_the_edge() {
+    assert_eq!(regime::apply_gate_band(&[0.5], 0.5).unwrap(), vec![1.0]);
+    assert_eq!(regime::apply_gate_band(&[0.25], 0.5).unwrap(), vec![0.25]);
+}
+
+#[test]
+fn gate_band_zero_is_identity_and_one_holds_the_start() {
+    let g = [0.1, 0.9, 0.9, 0.0, 1.0];
+    assert_eq!(regime::apply_gate_band(&g, 0.0).unwrap(), g.to_vec());
+    assert_eq!(regime::apply_gate_band(&g, 1.0).unwrap(), vec![1.0; 5]);
+}
+
+fn gate_with(r: &[f64], min_days: usize, refit: usize, o: regime::GateOptions) -> regime::Result<Vec<f64>> {
+    regime::regime_gate_with(r, 3, min_days, refit, "prob", 0.5, 1e-8, 500, 1e-8, o).map(|x| x.0)
+}
+
+#[test]
+fn gate_band_range_is_checked() {
+    for band in [-0.1, 1.1, f64::NAN] {
+        assert!(regime::apply_gate_band(&[1.0], band).is_err());
+        let o = regime::GateOptions { gate_band: band, transition_floor: 0.0 };
+        assert!(gate_with(&[0.0; 10], 5, 63, o).is_err());
+    }
+}
+
+fn head_700() -> Vec<f64> {
+    regime::load_dataset("../data").unwrap().index_returns[..700].to_vec()
+}
+
+#[test]
+fn regime_gate_band_equals_post_processing() {
+    let r = head_700();
+    let raw = gate_with(&r, 504, 100, regime::GateOptions::default()).unwrap();
+    let o = regime::GateOptions { gate_band: 0.3, transition_floor: 0.0 };
+    assert_eq!(gate_with(&r, 504, 100, o).unwrap(), regime::apply_gate_band(&raw, 0.3).unwrap());
+}
+
+#[test]
+fn regime_gate_rejects_a_total_loss_return() {
+    let mut r = vec![0.001; 20];
+    r[7] = -1.0;
+    let err = gate_with(&r, 10, 63, regime::GateOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("<= -100% at t=7"), "{err}");
+}
+
+#[test]
+fn regime_gate_transition_floor_zero_is_bitwise_default() {
+    let r = head_700();
+    let plain = regime_gate(&r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8).unwrap().0;
+    assert_eq!(gate_with(&r, 504, 100, regime::GateOptions::default()).unwrap(), plain);
+    let o = regime::GateOptions { gate_band: 0.0, transition_floor: 1e-6 };
+    assert!(gate_with(&r, 504, 100, o).unwrap().iter().all(|g| (0.0..=1.0).contains(g)));
+}

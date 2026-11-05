@@ -26,7 +26,8 @@ use crate::error::{RegimeError, Result};
 use crate::hmm::{GaussianHmm, HmmFitResult};
 use crate::matrix::Matrix;
 use crate::strategies::{
-    apply_gate, carry_positions, carry_total_returns, momentum_positions, regime_gate,
+    apply_gate, apply_gate_band, carry_positions, carry_total_returns, momentum_positions,
+    regime_gate_with, GateOptions,
 };
 
 /// Pinned strategy/backtest configuration (`data/config.json`).
@@ -66,6 +67,12 @@ pub struct Config {
     pub cost_bps: f64,
     /// Trading days per year.
     pub trading_days: usize,
+    /// Optional no-trade band; absent means 0 (off).
+    #[serde(default)]
+    pub gate_band: f64,
+    /// Optional warm-start transition floor; absent means 0 (off).
+    #[serde(default)]
+    pub transition_floor: f64,
 }
 
 /// Bundled market data.
@@ -323,7 +330,7 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let viterbi_accuracy = hits as f64 / dataset.true_states.len() as f64;
 
     // Walk-forward regime gate on the index (no lookahead).
-    let (gate, gate_models) = regime_gate(
+    let (gate, gate_models) = regime_gate_with(
         &dataset.index_returns,
         k,
         cfg.train_min_days,
@@ -333,6 +340,7 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
         cfg.em_tol,
         cfg.em_max_iter,
         cfg.var_floor,
+        GateOptions { gate_band: cfg.gate_band, transition_floor: cfg.transition_floor },
     )?;
 
     let cost = cfg.cost_bps;
@@ -426,6 +434,39 @@ fn argmax(xs: &[f64]) -> usize {
         }
     }
     best
+}
+
+/// Filtered backtests with the pipeline's gate banded by `band`: the
+/// `gate_band_0p3` golden scalars (API_SPEC 5).  The band only post-processes
+/// the gate, so no refit is needed.
+///
+/// # Errors
+/// `band` outside `[0, 1]`, or a failing backtest.
+pub fn gate_band_values(pipe: &PipelineOutput, band: f64) -> Result<BTreeMap<String, f64>> {
+    let ds = &pipe.dataset;
+    let cfg = &pipe.config;
+    let dates = Some(ds.dates.as_slice());
+    let gate = apply_gate_band(&pipe.gate, band)?;
+    let mom_pos = momentum_positions(
+        &ds.trend_returns,
+        cfg.momentum_lookback,
+        cfg.vol_target,
+        cfg.ewma_lambda,
+        cfg.leverage_cap,
+    )?;
+    let carry_pos =
+        carry_positions(&ds.fx_rate_diffs, cfg.carry_top_n, cfg.carry_bottom_n, cfg.rebalance_days)?;
+    let carry_rets = carry_total_returns(&ds.fx_spot_returns, &ds.fx_rate_diffs)?;
+    let mom = run_backtest(&apply_gate(&mom_pos, &gate)?, &ds.trend_returns, cfg.cost_bps, dates)?;
+    let carry = run_backtest(&apply_gate(&carry_pos, &gate)?, &carry_rets, cfg.cost_bps, dates)?;
+    let net: Vec<f64> =
+        mom.net_returns.iter().zip(&carry.net_returns).map(|(x, y)| 0.5 * x + 0.5 * y).collect();
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let mut out = BTreeMap::new();
+    out.insert("mean_turnover_momentum".to_string(), mean(&mom.turnover));
+    out.insert("mean_turnover_carry".to_string(), mean(&carry.turnover));
+    out.insert("sharpe_combined".to_string(), compute_metrics(&net, dates)?.sharpe);
+    Ok(out)
 }
 
 /// Build the golden-value map `case name -> {key -> value}` from a full

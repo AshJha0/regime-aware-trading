@@ -276,8 +276,80 @@ pub fn regime_gate(
     max_iter: usize,
     var_floor: f64,
 ) -> Result<(Vec<f64>, Vec<GaussianHmm>)> {
+    regime_gate_with(
+        index_returns,
+        n_states,
+        train_min_days,
+        refit_days,
+        mode,
+        threshold,
+        tol,
+        max_iter,
+        var_floor,
+        GateOptions::default(),
+    )
+}
+
+/// Optional gate settings; the default is everything off.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GateOptions {
+    /// No-trade band in `[0, 1]` ([`apply_gate_band`]).
+    pub gate_band: f64,
+    /// Warm-start floor for the refits (API_SPEC 1.3).
+    pub transition_floor: f64,
+}
+
+/// No-trade band on a gate series (API_SPEC 3.3):
+/// `o[t] = g[t]` if `|g[t] - o[t-1]| > band` else `o[t-1]`, with `o[-1] = 1`.
+/// Causal; a band of 0 returns the gate unchanged.
+///
+/// # Errors
+/// `band` outside `[0, 1]` or a non-finite gate value.
+pub fn apply_gate_band(gate: &[f64], band: f64) -> Result<Vec<f64>> {
+    if !(0.0..=1.0).contains(&band) {
+        return Err(RegimeError::InvalidInput(format!("gate_band must be in [0, 1], got {band}")));
+    }
+    if gate.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("gate contains NaN or inf".into()));
+    }
+    let mut held = 1.0;
+    Ok(gate
+        .iter()
+        .map(|&g| {
+            if (g - held).abs() > band {
+                held = g;
+            }
+            held
+        })
+        .collect())
+}
+
+/// [`regime_gate`] with [`GateOptions`].
+///
+/// # Errors
+/// As [`regime_gate`], plus a return `<= -1` (the message names the day),
+/// `gate_band` outside `[0, 1]`, or an invalid `transition_floor`.
+#[allow(clippy::too_many_arguments)]
+pub fn regime_gate_with(
+    index_returns: &[f64],
+    n_states: usize,
+    train_min_days: usize,
+    refit_days: usize,
+    mode: &str,
+    threshold: f64,
+    tol: f64,
+    max_iter: usize,
+    var_floor: f64,
+    options: GateOptions,
+) -> Result<(Vec<f64>, Vec<GaussianHmm>)> {
     if index_returns.iter().any(|v| !v.is_finite()) {
         return Err(RegimeError::InvalidInput("index_returns contain NaN or inf".into()));
+    }
+    if let Some(t) = index_returns.iter().position(|&v| v <= -1.0) {
+        return Err(RegimeError::InvalidInput(format!(
+            "index_returns contain a return <= -100% at t={t} ({})",
+            index_returns[t]
+        )));
     }
     if mode != "prob" && mode != "binary" {
         return Err(RegimeError::InvalidInput(format!(
@@ -289,8 +361,15 @@ pub fn regime_gate(
             "gate threshold must be in [0, 1], got {threshold}"
         )));
     }
-    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
-    GaussianHmm::new(n_states, tol, max_iter, var_floor)?;
+    if !(0.0..=1.0).contains(&options.gate_band) {
+        return Err(RegimeError::InvalidInput(format!(
+            "gate_band must be in [0, 1], got {}",
+            options.gate_band
+        )));
+    }
+    // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
+    GaussianHmm::new(n_states, tol, max_iter, var_floor)?
+        .with_transition_floor(options.transition_floor)?;
     let t_total = index_returns.len();
     if train_min_days <= n_states || refit_days < 1 {
         return Err(RegimeError::InvalidInput(
@@ -311,7 +390,8 @@ pub fn regime_gate(
     let mut calm_state = 0usize;
     for t in t0..t_total {
         if (t - t0) % refit_days == 0 {
-            let mut model = GaussianHmm::new(n_states, tol, max_iter, var_floor)?;
+            let mut model = GaussianHmm::new(n_states, tol, max_iter, var_floor)?
+                .with_transition_floor(options.transition_floor)?;
             let warm = models.last().and_then(|m| m.params()).cloned();
             let window = full.head(t + 1)?;
             let refit = |model: &mut GaussianHmm| -> Result<Vec<f64>> {
@@ -340,7 +420,7 @@ pub fn regime_gate(
             0.0
         };
     }
-    Ok((gate, models))
+    Ok((apply_gate_band(&gate, options.gate_band)?, models))
 }
 
 /// Index of the lowest-variance state on dimension 0 (ties -> lower label).
