@@ -158,19 +158,19 @@ fn takeaway(pipe: &PipelineOutput) {
     let mu = &pipe.combined_unfiltered.metrics;
     let mf = &pipe.combined_filtered.metrics;
     println!("{LINE}");
-    println!("Takeaway: momentum and carry both lose money in the high-vol crisis");
-    println!("regime; scaling by the filtered P(calm) improves the combined Sharpe");
+    println!("Takeaway: the figures below are full-sample and include 503 warm-up days");
+    println!("on which the gate is 1, so they are not evidence for the gate:");
     println!(
-        "({:.2} -> {:.2}) and maxDD ({} -> {})",
+        "Sharpe ({:.2} -> {:.2}), maxDD ({} -> {})",
         mu.sharpe,
         mf.sharpe,
         pct(mu.max_dd),
         pct(mf.max_dd)
     );
     println!(
-        "at the cost of total return ({} -> {}) — the filter",
+        "return ({} -> {}).",
         pct(mu.ann_return),
         pct(mf.ann_return)
     );
-    println!("buys risk reduction, not free performance.");
+    println!("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.");
 }

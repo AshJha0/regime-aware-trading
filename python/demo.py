@@ -107,11 +107,11 @@ def main() -> int:
 
     mu, mf = pipe["combined"]["unfiltered"]["metrics"], pipe["combined"]["filtered"]["metrics"]
     print(LINE)
-    print("Takeaway: momentum and carry both lose money in the high-vol crisis")
-    print("regime; scaling by the filtered P(calm) improves the combined Sharpe")
-    print(f"({mu['sharpe']:.2f} -> {mf['sharpe']:.2f}) and maxDD ({mu['max_dd']:+.2%} -> {mf['max_dd']:+.2%})")
-    print(f"at the cost of total return ({mu['ann_return']:+.2%} -> {mf['ann_return']:+.2%}) — the filter")
-    print("buys risk reduction, not free performance.")
+    print("Takeaway: the figures below are full-sample and include 503 warm-up days")
+    print("on which the gate is 1, so they are not evidence for the gate:")
+    print(f"Sharpe ({mu['sharpe']:.2f} -> {mf['sharpe']:.2f}), maxDD ({mu['max_dd']:+.2%} -> {mf['max_dd']:+.2%})")
+    print(f"return ({mu['ann_return']:+.2%} -> {mf['ann_return']:+.2%}).")
+    print("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.")
     return 0
 
 

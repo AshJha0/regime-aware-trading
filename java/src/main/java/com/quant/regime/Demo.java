@@ -102,14 +102,14 @@ public final class Demo {
         Backtest.Metrics mu = pipe.combinedMetrics().get("unfiltered");
         Backtest.Metrics mf = pipe.combinedMetrics().get("filtered");
         System.out.println(LINE);
-        System.out.println("Takeaway: momentum and carry both lose money in the high-vol crisis");
-        System.out.println("regime; scaling by the filtered P(calm) improves the combined Sharpe");
-        System.out.printf(Locale.ROOT, "(%.2f -> %.2f) and maxDD (%+.2f%% -> %+.2f%%)%n",
+        System.out.println("Takeaway: the figures below are full-sample and include 503 warm-up days");
+        System.out.println("on which the gate is 1, so they are not evidence for the gate:");
+        System.out.printf(Locale.ROOT, "Sharpe (%.2f -> %.2f), maxDD (%+.2f%% -> %+.2f%%)%n",
                 mu.sharpe(), mf.sharpe(), 100.0 * mu.maxDd(), 100.0 * mf.maxDd());
         System.out.printf(Locale.ROOT,
-                "at the cost of total return (%+.2f%% -> %+.2f%%) — the filter%n",
+                "return (%+.2f%% -> %+.2f%%).%n",
                 100.0 * mu.annReturn(), 100.0 * mf.annReturn());
-        System.out.println("buys risk reduction, not free performance.");
+        System.out.println("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.");
     }
 
     private static void printModelRow(int k, GaussianHmm model, HmmFitResult res, double[] r) {

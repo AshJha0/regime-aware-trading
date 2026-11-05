@@ -41,6 +41,8 @@ fixtures draw their own seeded inputs).
 | Parameter/data shape + stochasticity validation on every entry point | yes | yes | yes | yes |
 | Viterbi decoding (log-space, pinned tie-break) | yes | yes | yes | yes |
 | Filtered / smoothed state probabilities | yes | yes | yes | yes |
+| Streaming `RegimeFilter` (allocation-free in C++ and Rust) | yes | yes | yes | yes |
+| Opt-in `gate_band` and `transition_floor` (off by default) | yes | yes | yes | yes |
 | Stationary distribution (pinned power method) | yes | yes | yes | yes |
 | Model selection: log-likelihood, AIC, BIC (K = 2 vs 3) | yes | yes | yes | yes |
 | Time-series momentum (252d signal, EWMA vol target, 4x cap) | yes | yes | yes | yes |
@@ -49,6 +51,7 @@ fixtures draw their own seeded inputs).
 | Backtest engine (pinned accounting, costs on turnover, full metrics) | yes | yes | yes | yes |
 | Wipe-out guard, returns > -1, strictly increasing dates | yes | yes | yes | yes |
 | Crisis-state attribution table | yes | yes | yes | yes |
+| Gate evaluation: baselines, block bootstrap, seed sweep | yes | no | no | no |
 | Golden-value test suite (22 cases / 83 scalars from `data/golden/golden.json`) | yes | yes | yes | yes |
 
 ## Directory layout
@@ -59,9 +62,12 @@ regime-aware-trading/
   LEARN.md                 <- theory: HMMs, EM, momentum, carry, regime filtering
   COOKBOOK.md              <- task-oriented recipes in all four languages (all compiled + run)
   API_SPEC.md              <- the pinned cross-language contract
+  CHANGELOG.md             <- release notes
   LICENSE                  <- MIT
+  .github/workflows/ci.yml <- CI: four languages, sanitizers, cookbook, docs checks
   docs/
     ARCHITECTURE.md        <- component design, data flow, numerics, desk usage (Mermaid)
+    GATE_EVALUATION.md     <- generated evidence on whether the gate helps
     GITHUB_PAGES.md        <- publishing guide for the docs site: https://ashjha0.github.io/regime-aware-trading/
     diagrams/*.mmd         <- raw Mermaid sources
   data/
@@ -73,13 +79,15 @@ regime-aware-trading/
     generate_data.py       <- seeded generator (numpy default_rng(83)); rewrites CSVs + golden
     golden/golden.json     <- 22 cross-language golden cases (83 scalars)
   python/
-    src/regime/            <- reference implementation (hmm, strategies, backtest, pipeline)
+    src/regime/            <- reference implementation (hmm, strategies, backtest, pipeline, evaluation)
     tests/                 <- pytest suite
     demo.py                <- end-to-end report
   cpp/                     <- C++17 port (namespace regime::), CMake + GoogleTest
   rust/                    <- Rust port (crate regime), cargo
   java/                    <- Java 21 port (com.quant.regime), javac + JUnit 4
   tools/check_cookbook.py  <- compiles and runs every COOKBOOK snippet against the built libraries
+  tools/check_docs.py      <- fails CI if documented counts drift from the repository
+  tools/evaluate_gate.py   <- regenerates docs/GATE_EVALUATION.md (--seeds N)
 ```
 
 ## Build, run, test
@@ -100,7 +108,7 @@ executable bit does not matter.
 ```bash
 cd python
 PYTHONPATH=src python3 demo.py          # end-to-end demo
-PYTHONPATH=src python3 -m pytest -q     # test suite (112 tests)
+PYTHONPATH=src python3 -m pytest -q     # test suite (118 tests)
 ```
 
 ### C++
@@ -109,7 +117,7 @@ PYTHONPATH=src python3 -m pytest -q     # test suite (112 tests)
 cd cpp
 bash build.sh                           # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2
 ./build/demo                            # demo
-ctest --test-dir build --output-on-failure   # tests (GoogleTest, 86 tests in one binary)
+ctest --test-dir build --output-on-failure   # tests (GoogleTest, 90 tests in one binary)
 ```
 
 ### Rust
@@ -118,7 +126,7 @@ ctest --test-dir build --output-on-failure   # tests (GoogleTest, 86 tests in on
 cd rust
 cargo build --release                   # zero warnings
 cargo run --release --bin demo          # demo
-cargo test --release                    # 87 integration tests
+cargo test --release                    # 91 integration tests
 ```
 
 ### Java
@@ -127,13 +135,13 @@ cargo test --release                    # 87 integration tests
 cd java
 bash build.sh                           # javac -Xlint:all -Werror into out/
 bash demo.sh                            # demo main
-bash test.sh                            # JUnitCore on all *Test classes (86 tests)
+bash test.sh                            # JUnitCore on all *Test classes (90 tests)
 ```
 
 ### Cookbook snippets
 
 ```bash
-python3 tools/check_cookbook.py         # after the three native builds; 56 snippets
+python3 tools/check_cookbook.py         # after the three native builds; 60 snippets
 ```
 
 ## Demo output (Python reference, truncated)
@@ -175,14 +183,14 @@ Annualized net return by decoded regime (state 0 = lowest mean):
   carry unfiltered         -11.09%   +10.06%    +16.70%
   combined filtered         -0.89%    +6.75%     +1.13%
 ------------------------------------------------------------------------------
-Takeaway: momentum and carry both lose money in the high-vol crisis
-regime; scaling by the filtered P(calm) improves the combined Sharpe
-(1.80 -> 1.87) and maxDD (-5.23% -> -3.41%)
-at the cost of total return (+7.07% -> +4.88%) — the filter
-buys risk reduction, not free performance.
+Takeaway: the figures below are full-sample and include 503 warm-up days
+on which the gate is 1, so they are not evidence for the gate:
+Sharpe (1.80 -> 1.87), maxDD (-5.23% -> -3.41%)
+return (+7.07% -> +4.88%).
+See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.
 ```
 
-The takeaway printed above is a full-sample figure and should not be read as evidence for the gate; see the summary at the top. The demo reports full-sample metrics. Note that the sample includes
+The demo reports full-sample metrics. Note that the sample includes
 251 days on which momentum holds no position (before its first full
 lookback window) and 503 days on which the gate is 1 (before the first
 walk-forward fit); a from-first-trade window would raise the momentum
@@ -205,7 +213,7 @@ synthetic carry panel embedded in the file that actually re-ranks the
 basket (positions exact, backtest metrics at 1e-8) — each with an
 absolute tolerance (`tol = 0` means exact). Every value was produced by
 the Python reference running the full pinned configuration; the file also
-bakes in semantic invariants (filtered Sharpe > unfiltered and shallower
+bakes in semantic invariants (shallower
 drawdown for the combined book, filtered momentum has a shallower
 drawdown but a lower return, state counts sum to 2000, the re-rank panel
 flips the book at day 21).
@@ -219,8 +227,8 @@ cross-language drift is a real bug, not noise: a port that diverges beyond
 contract. Regenerate data and golden values with
 `python3 data/generate_data.py` (seeded; CSVs reproduce byte for byte, golden values to about 1e-11 across numpy versions).
 
-Test counts: Python 112 (pytest), C++ 86 (GoogleTest), Rust 87
-(cargo integration tests), Java 86 (JUnit 4); plus 56 compiled-and-run
+Test counts: Python 118 (pytest), C++ 90 (GoogleTest), Rust 91
+(cargo integration tests), Java 90 (JUnit 4); plus 60 compiled-and-run
 COOKBOOK snippets and the four demos.
 
 ## Real-world usage notes

@@ -45,7 +45,7 @@ flowchart TD
     FX --> CAR["carry_positions<br/>rank diffs, top3/bottom3, 21d rebalance"]
     FX --> CRET["carry_total_returns<br/>spot + diff(t-1)/252"]
 
-    GATE --> APG["apply_gate: P_filt = gate * P"]
+    GATE --> APG["apply_gate: P_filt = gate * P<br/>(optional gate_band no-trade band)"]
     MOM --> APG
     CAR --> APG
 
@@ -59,9 +59,10 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>20 cross-language cases, 77 scalars"]
+    BT --> OUT["demo report / golden.json<br/>22 cross-language cases, 83 scalars"]
     COMB --> OUT
     CRISIS --> OUT
+    OUT --> EVAL["tools/evaluate_gate.py<br/>baselines, bootstrap, seed sweep<br/>docs/GATE_EVALUATION.md"]
 ```
 
 Two distinct HMM uses coexist and must not be confused:
@@ -307,7 +308,7 @@ Four layers, mirrored in each language:
    grid-style property test that better-matched parameters score higher
    likelihoods; costs never help (property over a cost grid);
    the accounting identity; and the one-day-shift no-lookahead test.
-3. **Golden values.** All 20 cases / 77 scalars in
+3. **Golden values.** All 22 cases / 83 scalars in
    `data/golden/golden.json` — HMM fit results at 1e-6/1e-5,
    probabilities at 1e-8, all seven strategy metrics at 1e-8, Viterbi
    counts exact, and the synthetic `carry_rerank_*` panel (positions
@@ -320,7 +321,7 @@ Four layers, mirrored in each language:
    with serde_json, Java with a small bundled parser), rebuilds the
    re-rank panel from the case's `inputs`, and must run the full pinned
    config for golden comparisons; the assertion on the scalar count is
-   exact (77).
+   exact (83).
 4. **Edge cases.** K=1 rejected; variance floor engages when K exceeds
    distinct data support; short series rejected; carry tie-break by
    index; rebalance window longer than the sample keeps the day-0 book;
@@ -346,7 +347,7 @@ Four layers, mirrored in each language:
    failing refit names its day; NaN gates rejected; wipe-out day named
    and `max_dd >= -1` on accepted input; `compute_metrics` validates its
    own dates; duplicated, unsorted and malformed dates rejected and
-   sorted non-contiguous months compound as calendar months; the 21-day
+   sorted non-contiguous months compound as calendar months; the 22-day
    block fallback drops the trailing partial block; `A = 0` assets
    rejected; non-positive equity rejected by `max_drawdown`; state labels
    outside `[0, K)` and `K < 1` rejected; walk-forward overrides
@@ -359,6 +360,9 @@ reference itself is right, which matters because the reference produces
 the golden file.
 
 ## 7. Performance notes
+
+`gate_band` and `transition_floor` (API_SPEC 1.3, 3.3) are opt-in and off
+by default, so the pinned results do not depend on them.
 
 * Complexities: forward/backward `O(T K^2)` each, one EM iteration
   `O(T K^2 + T K D)`, Viterbi `O(T K^2)`, full walk-forward gate roughly
@@ -422,7 +426,10 @@ system; here is where each piece plugs in and what has to be replaced.
    that killed a state is reported, not hidden.
 2. **Walk-forward validation.** `regime_gate` is the honest version of
    the same thing: expanding-window refits, filtered probabilities only,
-   `models[i].fit_result` for a per-refit audit trail. Sweep
+   `models[i].fit_result` for a per-refit audit trail. Judge any result with
+   `tools/evaluate_gate.py`, which reports the post-warm-up window against
+   constant and volatility baselines over simulated seeds
+   (`docs/GATE_EVALUATION.md`). Sweep
    `train_min_days`, `refit_days` and `gate_mode` on *held-out* history;
    the bundled `config.json` values are teaching defaults, and the
    `run_full_pipeline(..., refit_days=, train_min_days=)` overrides exist
@@ -448,6 +455,7 @@ system; here is where each piece plugs in and what has to be replaced.
    `tools/check_cookbook.py` before use.
 6. **Reporting.** Quote full-sample metrics with the warm-up caveat
    (251 flat momentum days, 503 gate = 1 days), say that Sharpe is raw,
-   and attach the crisis-attribution table — the sign of the crisis-state
-   return is the whole argument for the overlay.
+   and quote the post-warm-up comparison from `docs/GATE_EVALUATION.md`
+   beside them. The crisis-attribution table uses hindsight Viterbi states,
+   so it explains the overlay but does not prove it.
 
