@@ -130,7 +130,11 @@ int main(int argc, char** argv) {
                     100.0 * mu.max_dd, 100.0 * mf.max_dd);
         std::printf("return (%+.2f%% -> %+.2f%%).\n",
                     100.0 * mu.ann_return, 100.0 * mf.ann_return);
-        std::printf("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.\n");
+        std::printf("Seed 19 is favourable to the gate: its post-warm-up Sharpe gain (0.54 -> 0.99)\n");
+        std::printf("sits at the 85th percentile of 100 seeds, and its 95%% interval includes zero.\n");
+        std::printf("On real US equity data, 1963-2026, the gate lost to the unfiltered book and\n");
+        std::printf("to a 21-day vol rule, with bootstrap intervals below zero. Tuning has stopped.\n");
+        std::printf("See docs/REAL_DATA_EVALUATION.md and docs/GATE_EVALUATION.md.\n");
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "demo failed: %s\n", e.what());

@@ -1,0 +1,17 @@
+stateDiagram-v2
+    direction LR
+    state "RegimeFilter (streaming, API_SPEC 1.10)" as RF {
+        [*] --> Constructed: validate params once, copy, precompute log terms
+        Constructed --> Running: first update(x) uses startprob, or alpha_prev if given
+        Running --> Running: update(x) checks x only, then one O(K^2) step
+        Running --> Running: failed update raises, state unchanged
+        Running --> Constructed: reset()
+    }
+    state "forward_step (stateless)" as FS {
+        [*] --> Call: caller holds alpha
+        Call --> Call: validate params and allocate on every call
+    }
+    note right of FS
+        regime_gate keeps using forward_step.
+        Both agree within 1e-12 per entry.
+    end note

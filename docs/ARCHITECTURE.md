@@ -6,15 +6,25 @@ Design notes for the four parallel implementations (Python reference
 [`../API_SPEC.md`](../API_SPEC.md); this document explains *why* the
 pieces are shaped the way they are.
 
+**Read the design with the result in mind.** On real US equity data from 1963 to
+2026 the HMM gate lost to the unfiltered book and to a 21-day vol rule, with
+bootstrap intervals below zero ([`REAL_DATA_EVALUATION.md`](REAL_DATA_EVALUATION.md)),
+so tuning has stopped ([`PREREGISTRATION.md`](PREREGISTRATION.md)). The engineering
+below held up: determinism, parity and no-lookahead are tested. The research claim
+did not. Bundled seed 19 flatters the gate: post-warm-up Sharpe 0.54 to 0.99 sits at
+the 85th percentile of 100 seeds and the interval includes zero.
+
 ## 1. Components and responsibilities
 
 | Component | Python module | Responsibility |
 |---|---|---|
 | HMM core | `hmm.py` | Diagonal-covariance Gaussian HMM: pinned init, scaled forward-backward, Baum-Welch EM, Viterbi, filtered/smoothed posteriors, stationary distribution, AIC/BIC. Plus `forward_step`, the single-observation filter update used by the gate. |
-| Strategies | `strategies.py` | Position construction only — momentum (signal + EWMA vol targeting), carry (ranking + rebalance schedule + accrual), the walk-forward `regime_gate`, and `apply_gate`. Strategies never touch P&L. |
+| Strategies | `strategies.py` | Position construction only — momentum (signal + EWMA vol targeting), carry (ranking + rebalance schedule + accrual), `portfolio_scale`, the walk-forward `regime_gate` with its opt-in band and guard, and `apply_gate`. Strategies never touch P&L. |
 | Backtest engine | `backtest.py` | The one place accounting exists: gross/net/turnover/equity recursions, summary metrics, drawdown, state-conditional attribution. Every strategy runs through the same engine. |
-| Pipeline | `pipeline.py` | Data loading, the end-to-end study (`run_full_pipeline`), and `golden_cases`. Demo, golden generator, and golden tests all call the same function, so they cannot drift apart. |
-| Data generator | `data/generate_data.py` | The only RNG in library code (seeded, `default_rng(83)`; test fixtures draw their own seeded inputs). Simulates the true 3-state DGP, writes CSVs byte-for-byte reproducibly, self-validates (enumerated forward check, EM monotonicity), then writes `golden.json`. |
+| Pipeline | `pipeline.py` | Data loading, `scaled_book`, the end-to-end study (`run_full_pipeline`), and `golden_cases`. Demo, golden generator, and golden tests all call the same function, so they cannot drift apart. |
+| Evaluation | `evaluation.py` | Python only: baseline gates, paired block bootstrap, cost and lag sweeps, break-even cost, classification report. It calls the pinned backtest and changes no pinned number. |
+| Cost model | `costs.py` | Python only and opt-in: spread plus square-root impact, for the capacity report. Separate from `run_backtest`, and its inputs are illustrative. |
+| Data generator | `data/generate_data.py` | The only RNG in library code (seeded, `default_rng(19)`, the seed picked by the rule in API_SPEC 4; test fixtures draw their own seeded inputs). Simulates the true 3-state DGP, writes CSVs byte-for-byte reproducibly, self-validates (enumerated forward check, EM monotonicity), then writes `golden.json`. |
 
 The separation is deliberate: **signals decide, the engine accounts**.
 Strategy code emits a position matrix `P[t, a]` ("decided at the close of
@@ -27,7 +37,7 @@ one place to hide, and one test (`test_no_lookahead_shift`) to catch them.
 ```mermaid
 flowchart TD
     subgraph DATA["data/ (seeded generator, RNG only here)"]
-        GEN[generate_data.py<br/>default_rng 83, true 3-state DGP]
+        GEN[generate_data.py<br/>default_rng 19, true 3-state DGP]
         IDX[market_index.csv]
         TRD[trend_assets.csv]
         FX[fx_carry.csv<br/>spot_ret + rate_diff]
@@ -45,12 +55,12 @@ flowchart TD
     FX --> CAR["carry_positions<br/>rank diffs, top3/bottom3, 21d rebalance"]
     FX --> CRET["carry_total_returns<br/>spot + diff(t-1)/252"]
 
+    MOM --> SCALE["portfolio_scale<br/>one 10% vol scale from the unfiltered book"]
+    CAR --> SCALE
+    SCALE --> APG
     GATE --> APG["apply_gate: P_filt = gate * P<br/>(optional gate_band no-trade band)"]
-    MOM --> APG
-    CAR --> APG
 
-    MOM --> BT["run_backtest<br/>gross = P(t-1)*r(t), costs on turnover,<br/>equity, metrics"]
-    CAR --> BT
+    SCALE --> BT["run_backtest<br/>gross = P(t-1)*r(t), costs on turnover,<br/>equity, metrics"]
     CRET --> BT
     APG --> BT
 
@@ -59,10 +69,10 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>22 cross-language cases, 83 scalars"]
+    BT --> OUT["demo report / golden.json<br/>23 cross-language cases, 87 scalars"]
     COMB --> OUT
     CRISIS --> OUT
-    OUT --> EVAL["tools/evaluate_gate.py<br/>baselines, bootstrap, seed sweep<br/>docs/GATE_EVALUATION.md"]
+    OUT --> EVAL["tools/evaluate_*.py<br/>baselines, bootstrap, seed sweep, real data, capacity<br/>docs/*_EVALUATION.md"]
 ```
 
 Two distinct HMM uses coexist and must not be confused:
@@ -125,6 +135,8 @@ classDiagram
         +carry_total_returns(spot, diffs)
         +regime_gate(index_returns, ...) gate, models
         +apply_gate(positions, gate)
+        +apply_gate_band(gate, band)
+        +portfolio_scale(net, target, lambda, cap, first_day)
         +forward_step(params, alpha_prev, x_t)
     }
 
@@ -148,6 +160,7 @@ classDiagram
         <<module>>
         +load_dataset(dir) Dataset
         +run_full_pipeline(dir) results
+        +scaled_book(dataset, config)
         +golden_cases(pipe) list
     }
 
@@ -155,6 +168,12 @@ classDiagram
     GaussianHMM --> HMMFitResult : returns
     strategies --> GaussianHMM : regime_gate refits
     strategies --> HMMParams : forward_step
+    class RegimeFilter {
+        +update(x)
+        +reset(alpha_prev)
+        +alpha()
+    }
+    RegimeFilter --> HMMParams : validated once
     backtest --> BacktestResult : returns
     pipeline --> GaussianHMM : full-sample fits
     pipeline --> strategies : positions + gate
@@ -188,6 +207,67 @@ sequenceDiagram
     Note right of HMM: warm start keeps labels stable<br/>and EM iterations few.<br/>A dead state is flagged, never NaN
     HMM-->>WF: refreshed params, new k*, fresh full forward pass
     Note over WF: any refit error is re-raised with its day index (regime_gate refit at t=...)
+```
+
+The streaming filter and `forward_step` run the same recursion with different
+lifecycles. `forward_step` validates and allocates on every call and the gate
+uses it; `RegimeFilter` pays that once:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "RegimeFilter (streaming, API_SPEC 1.10)" as RF {
+        [*] --> Constructed: validate params once, copy, precompute log terms
+        Constructed --> Running: first update(x) uses startprob, or alpha_prev if given
+        Running --> Running: update(x) checks x only, then one O(K^2) step
+        Running --> Running: failed update raises, state unchanged
+        Running --> Constructed: reset()
+    }
+    state "forward_step (stateless)" as FS {
+        [*] --> Call: caller holds alpha
+        Call --> Call: validate params and allocate on every call
+    }
+    note right of FS
+        regime_gate keeps using forward_step.
+        Both agree within 1e-12 per entry.
+    end note
+```
+
+The opt-in no-trade band is a two-state rule on the gate series (API_SPEC 3.3):
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Holding: o starts at 1
+    Holding --> Holding: abs(g[t] - o[t-1]) <= band, keep o, no gate trade
+    Holding --> Moved: abs(g[t] - o[t-1]) > band (strict), o = g[t]
+    Moved --> Holding: next day, compare against the new o
+    note right of Holding
+        band = 0 gives o = g exactly.
+        The portfolio scale still moves daily,
+        so the book trades even while o holds.
+    end note
+```
+
+The opt-in calm-state guard adds one decision to each refit:
+
+```mermaid
+flowchart TD
+    REFIT["Refit day t"] --> FIT["Fit on true window r[0..t]"]
+    FIT --> K0["k0 = argmin variance"]
+    K0 --> ON{"calm_guard m > 0?"}
+    ON -- "no (default)" --> USE0["k* = k0, filter over true window"]
+    ON -- "yes" --> W{"pi[k0] < m?"}
+    W -- "no" --> SEL["k* = select_calm_state(variances, pi, m)"]
+    W -- "yes: guard trips" --> REC["Append t to guard_trips"]
+    REC --> CLIP["winsorize_mad: clip to<br/>median +/- 8 x 1.4826 x MAD"]
+    CLIP --> REFIT2["Discard the model, refit on the clipped<br/>window from the same start"]
+    REFIT2 --> SEL
+    SEL --> PASS["Filter pass over the window<br/>the kept model was fitted on"]
+    USE0 --> NEXT["Forward steps on true returns until the next refit"]
+    PASS --> NEXT
+    NEXT --> WARM["Next refit warm-starts from the model kept<br/>and fits the true window first"]
+    WARM --> REFIT
 ```
 
 ## 4. Numerical design decisions and trade-offs
@@ -234,8 +314,8 @@ sequenceDiagram
   languages, and honest: a re-seeded state changes the optimization path
   silently, whereas a flag lets the walk-forward gate continue with a
   finite model *and* lets the desk audit which refits degenerated. The
-  bundled pipeline never trips it (minimum support across all 518 EM
-  iterations of the full study is about 8.9 days of posterior mass).
+  bundled pipeline never trips it: none of the 24 walk-forward refits
+  reports a dead state.
 * **Validation at the boundary, arithmetic inside.** `validate_params`
   runs on every inference call, warm start, `set_params` and
   `forward_step`: shapes against `(K, D)`, finiteness, `variances > 0`,
@@ -248,11 +328,12 @@ sequenceDiagram
   a liability into a non-issue: no public path reaches them with a bad
   shape.
 * **Warm-started refits.** Each refit initializes from the previous
-  label-sorted fit. This cuts EM iterations dramatically (the expanding
-  window changes little in 63 days) and keeps state identities stable
-  across refits; the calm state is nevertheless re-identified per model by
-  `argmin variance` rather than trusted by label — walk-forward fits can
-  reorganize. The opt-in `calm_guard` (API_SPEC 3.3) adds a stationary-weight
+  label-sorted fit, which keeps state identities stable across refits. It
+  does not always save iterations: the 24 bundled refits took 27 to 141
+  against 71 for the cold full-sample fit. The calm state is re-identified per model by
+  `argmin variance` rather than trusted by label, because walk-forward fits can
+  reorganize. Crisis likewise means `argmax variance`: labels are sorted by mean,
+  and the mean is the weakest estimate (on seed 19 the crisis state is state 2). The opt-in `calm_guard` (API_SPEC 3.3) adds a stationary-weight
   check to that choice, because the raw argmin can land on a state holding
   one outlier.
 * **Stationary distribution by power method** (pinned) rather than an
@@ -264,10 +345,14 @@ sequenceDiagram
   O(T) rather than O(T * lookback). EWMA variance is seeded with the mean
   squared return of the first window (zero-mean convention, pinned) so the
   recursion has a well-defined deterministic start.
+* **Portfolio scale before the gate** (API_SPEC 3.5). One scale, computed from
+  the unfiltered book, multiplies both sleeves, and the gate multiplies that. A
+  scale measured on the gated book would lever the gate away. The price is real:
+  the scale moves daily, so raw carry at 0.588 turnover a year becomes 34.38.
 * **Cost model**: linear bps on one-sided turnover, charged the day the
-  trade is made (`net[0]` pays for building the initial book). Simple,
-  pinned, and sufficient for the teaching point; market impact and
-  bid/ask asymmetry are out of scope.
+  trade is made (`net[0]` pays for building the initial book). Simple and
+  pinned. Size-dependent cost lives in the opt-in `regime.costs`, outside the
+  backtest, so a capacity study cannot disturb a golden value.
 
 ## 5. Error-handling strategy per language
 
@@ -308,20 +393,21 @@ Four layers, mirrored in each language:
    grid-style property test that better-matched parameters score higher
    likelihoods; costs never help (property over a cost grid);
    the accounting identity; and the one-day-shift no-lookahead test.
-3. **Golden values.** All 22 cases / 83 scalars in
+3. **Golden values.** All 23 cases / 87 scalars in
    `data/golden/golden.json` — HMM fit results at 1e-6/1e-5,
    probabilities at 1e-8, all seven strategy metrics at 1e-8, Viterbi
    counts exact, and the synthetic `carry_rerank_*` panel (positions
    exact, backtest at 1e-8) that is the only golden protection for the
-   rebalance/ranking path — plus the baked-in sign/semantic cases (crisis
-   momentum return < 0, filtered combined Sharpe > unfiltered and maxDD
-   shallower, filtered momentum maxDD shallower but return lower, the
-   re-rank panel flips the book at day 21). Every language parses the
+   rebalance/ranking path — plus the baked-in semantic cases (combined maxDD
+   shallower when filtered, filtered momentum maxDD shallower but return
+   lower, the re-rank panel flips the book at day 21). No golden asserts that
+   the gate raises Sharpe or that crisis momentum has a given sign: those are
+   properties of one path. Every language parses the
    same flat JSON schema (C++ with a minimal hand-rolled reader, Rust
    with serde_json, Java with a small bundled parser), rebuilds the
    re-rank panel from the case's `inputs`, and must run the full pinned
    config for golden comparisons; the assertion on the scalar count is
-   exact (83).
+   exact (87).
 4. **Edge cases.** K=1 rejected; variance floor engages when K exceeds
    distinct data support; short series rejected; carry tie-break by
    index; rebalance window longer than the sample keeps the day-0 book;
@@ -353,11 +439,66 @@ Four layers, mirrored in each language:
    outside `[0, K)` and `K < 1` rejected; walk-forward overrides
    (`refit_days`, `train_min_days`) run in every port.
 
+Python adds tests for the evaluation and cost code and hand-calculated checks
+(`test_evaluation.py`, `test_costs.py`, `test_hand_calculated.py`). Test counts
+are in the README, and `tools/check_docs.py` compares the native ones with the
+sources.
+
 The Python suite additionally cross-checks the K=3 fit against
 `hmmlearn` when it is installed (skipped otherwise) — an independent
 implementation agreeing on the bundled data is strong evidence the
 reference itself is right, which matters because the reference produces
 the golden file.
+
+### Evaluation and checks
+
+Tests show the code matches the spec. A separate workflow asks whether the idea
+earns anything, and it is the one that stopped the project:
+
+```mermaid
+flowchart TD
+    IDEA["Candidate signal<br/>(here: HMM gate)"] --> BOOK["Same scaled book for every gate<br/>build_book, API_SPEC 3.5"]
+    BOOK --> WIN["Keep only days the gate can affect<br/>window t >= 504"]
+    WIN --> BASE["Compare with baselines<br/>unfiltered, constant at mean gate,<br/>21-day vol rule, EWMA vol rule, oracle"]
+    BASE --> BOOT["Paired stationary block bootstrap<br/>of the Sharpe difference"]
+    BOOT --> COST["Cost sweep, lag sweep,<br/>break-even cost"]
+    COST --> SEEDS["Seed sweep over DGP scenarios<br/>base, half_crisis, vol_only, fat_tails"]
+    SEEDS --> REAL["Real data, pinned configuration<br/>Kenneth French daily, 1963-2026"]
+    REAL --> PASS{"Lower end of the 95% interval<br/>above zero against the vol rule?"}
+    PASS -- "no: the result on 1963-2026" --> STOP["Verdict stands, tuning stops<br/>docs/PREREGISTRATION.md"]
+    PASS -- "yes" --> HOLD["Repeat once on an unseen holdout<br/>with a configuration committed first"]
+    STOP -. "a changed configuration is a new hypothesis" .-> HOLD
+    HOLD --> PUB["Publish the result whatever it shows"]
+```
+
+What runs where. The evaluation tools are slow or need a download, so they run by
+hand and their reports are committed; the rest runs on every pull request:
+
+```mermaid
+flowchart LR
+    PR["Pull request or push to main"] --> GUARD
+    PR --> PY
+    PR --> CPP
+    PR --> SAN
+    PR --> RS
+    PR --> JV
+    PR --> CB
+    subgraph GUARD["guard job"]
+        WORD["banned-word grep"]
+        DOCS["tools/check_docs.py"]
+    end
+    PY["python 3.11<br/>pytest, any skip fails"]
+    CPP["c++ release<br/>ctest"]
+    SAN["c++ asan + ubsan<br/>ctest"]
+    RS["rust<br/>cargo test, clippy -D warnings"]
+    JV["java 21<br/>JUnit 4"]
+    CB["cookbook job<br/>tools/check_cookbook.py"]
+    GOLD["data/golden/golden.json"] --> PY & CPP & SAN & RS & JV
+    GOLD --> DOCS
+    DOCS --> READ["README, LEARN, COOKBOOK, API_SPEC,<br/>ARCHITECTURE, site, diagrams"]
+    CB --> COOK["COOKBOOK.md snippets"]
+    MANUAL["Run by hand, not in CI:<br/>evaluate_gate, evaluate_band,<br/>evaluate_real_data, evaluate_capacity"] --> REPORTS["docs/*_EVALUATION.md"]
+```
 
 ## 7. Performance notes
 
@@ -366,12 +507,10 @@ by default, so the pinned results do not depend on them.
 
 * Complexities: forward/backward `O(T K^2)` each, one EM iteration
   `O(T K^2 + T K D)`, Viterbi `O(T K^2)`, full walk-forward gate roughly
-  `sum over refits of (iters * O(T_i K^2))` — kept small by warm starts
-  (later refits typically converge in a handful of iterations vs 63 from
-  cold).
+  `sum over refits of (iters * O(T_i K^2))`.
 * The full pinned pipeline (2 full-sample fits + 24 walk-forward refits +
-  4 backtests) runs in a few seconds in Python/numpy on 2 CPUs; the
-  native ports are comfortably faster. Test suites shorten walk-forward
+  4 backtests) took 42 s in Python/numpy on the laptop below with other jobs
+  running; the native ports are much faster. Test suites shorten walk-forward
   loops where the spec allows (`refit_days` override), but golden
   comparisons always run the pinned config.
 * Python vectorizes over states and assets and loops only over time
@@ -415,8 +554,10 @@ by default, so the pinned results do not depend on them.
 
 ## 8. How a desk would use this
 
-The study is a *template* for a regime overlay, not a production
-system; here is where each piece plugs in and what has to be replaced.
+The gate failed on real data, so this is not a recommended overlay. What a desk
+can reuse is the method: the pinned engine, the evaluation workflow and the
+preregistration rule. Here is where each piece plugs in and what has to be
+replaced.
 
 1. **Signal research.** Fit `GaussianHMM` on the desk's own risk proxy
    (an index, a vol index, a funding spread) with `fit`, compare `K` with
@@ -429,11 +570,12 @@ system; here is where each piece plugs in and what has to be replaced.
    `models[i].fit_result` for a per-refit audit trail. Judge any result with
    `tools/evaluate_gate.py`, which reports the post-warm-up window against
    constant and volatility baselines over simulated seeds
-   (`docs/GATE_EVALUATION.md`). Sweep
-   `train_min_days`, `refit_days` and `gate_mode` on *held-out* history;
-   the bundled `config.json` values are teaching defaults, and the
-   `run_full_pipeline(..., refit_days=, train_min_days=)` overrides exist
-   for exactly that sweep.
+   (`docs/GATE_EVALUATION.md`), and then on real data as
+   `tools/evaluate_real_data.py` does. Register the configuration first
+   (`docs/PREREGISTRATION.md`). The bundled `config.json` values are teaching
+   defaults. The `run_full_pipeline(..., refit_days=, train_min_days=)` overrides
+   exist for sweeps on your own history, and every sweep is a selection to
+   account for.
 3. **Position construction.** `momentum_positions` / `carry_positions`
    emit `P[t]` in *notional per unit of capital*, decided at the close.
    A desk replaces them with its own signal code and keeps the contract:
@@ -446,16 +588,17 @@ system; here is where each piece plugs in and what has to be replaced.
    Its refusals are the safety rails: a wipe-out day is an error naming
    `t`, not a negative equity curve; dates must be strictly increasing so
    `worst_month` means the same thing in every port. Replace the cost
-   model (impact, bid/ask, financing) before quoting numbers externally.
+   model (`regime.costs` is a starting form, with calibrated inputs; add
+   financing) before quoting numbers externally.
 5. **Cross-language deployment.** The reference is Python; the C++/Rust/
    Java ports are for hosting the model inside a C++, Rust or JVM stack
-   and are held to the same 83 golden scalars, the same validation rules
+   and are held to the same 87 golden scalars, the same validation rules
    and the same error family. A port that is modified locally should be
    re-run against `data/golden/golden.json` and
    `tools/check_cookbook.py` before use.
-6. **Reporting.** Quote full-sample metrics with the warm-up caveat
-   (251 flat momentum days, 503 gate = 1 days), say that Sharpe is raw,
-   and quote the post-warm-up comparison from `docs/GATE_EVALUATION.md`
-   beside them. The crisis-attribution table uses hindsight Viterbi states,
+6. **Reporting.** Lead with the real-data result. Quote full-sample metrics only
+   with the warm-up caveat (251 flat momentum days, 503 gate = 1 days), say that
+   Sharpe is raw, and quote the post-warm-up comparison from
+   `docs/GATE_EVALUATION.md` and the seed percentile beside them. The crisis-attribution table uses hindsight Viterbi states,
    so it explains the overlay but does not prove it.
 

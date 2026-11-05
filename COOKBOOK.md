@@ -1,7 +1,8 @@
 # COOKBOOK — regime recipes
 
-Task-oriented recipes for the `regime` toolkit, each in all four
-languages. Every snippet below is a complete program body that compiles
+Task-oriented recipes for the `regime` toolkit. Recipes 1 to 18 are in all
+four languages; 19 to 21 use the Python-only evaluation and cost code. Every
+snippet below is a complete program body that compiles
 and runs against the real library — `tools/check_cookbook.py` extracts
 each fenced block, builds it against the built library and runs it (see
 the end of this file). Snippets locate the bundled data as `../data`, i.e.
@@ -20,8 +21,19 @@ they run from the `python/`, `cpp/`, `rust/` or `java/` directory.
   `double[][]`; errors are `IllegalArgumentException`. The dataset is the
   nested record `Pipeline.Dataset`, backtest results are `Backtest.Result`.
 
-Numbers quoted in comments are golden values for the bundled data
-(`data/golden/golden.json`).
+Numbers quoted in comments come from the bundled data: golden values
+(`data/golden/golden.json`) or the output of the snippet. Recipes 7 to 13 run
+the strategies at their raw sizes, before the portfolio scale of API_SPEC 3.5,
+so their Sharpe ratios differ from the demo.
+
+**Read this before reusing a recipe.** The code works; the idea it serves did
+not. On real US equity data from 1963 to 2026 the HMM gate lost to the
+unfiltered book and to a 21-day vol rule, with bootstrap intervals below zero
+(`docs/REAL_DATA_EVALUATION.md`), so tuning has stopped
+(`docs/PREREGISTRATION.md`). The bundled seed 19 flatters the gate: post-warm-up
+Sharpe 0.54 to 0.99 sits at the 85th percentile of 100 seeds and the interval
+includes zero (`docs/GATE_EVALUATION.md`). Gate figures below show how the API
+behaves. They are not evidence that the gate works.
 
 ---
 
@@ -78,8 +90,10 @@ System.out.println("config: " + ds.config().nStates() + " states, "
 
 ## 2. How do I fit a Gaussian HMM and read off the regimes?
 
-States come back sorted by mean ascending (pinned): state 0 is the
-lowest-mean state — on this data, the crisis regime.
+States come back sorted by mean ascending (pinned), so a label says nothing
+about risk. On this data state 0 is the choppy regime and state 2, the
+highest-variance state, is the crisis regime, with a positive sampled mean.
+Identify crisis by `argmax` of the variance, and calm by `argmin`.
 
 **Python**
 
@@ -1051,9 +1065,381 @@ System.out.printf("P(state 0) now: %.6f%n", live.alpha()[0]);
 
 ---
 
+## 16. How do I stop the gate trading small moves (`gate_band`)?
+
+`gate_band` holds the applied gate until the raw gate has moved by more than
+the band: `o[t] = g[t]` if `|g[t] - o[t-1]| > band`, else `o[t-1]`. It is off
+by default. On real data a band of 0.3 narrowed the gate's loss but did not
+close it, and five bands tried on synthetic seeds are a selection, so this
+recipe shows the mechanism and not a recommended value
+(`docs/BAND_EVALUATION.md`). The snippets use the first 1200 days to stay
+fast.
+
+**Python**
+
+```python
+import numpy as np
+from regime import apply_gate_band, load_dataset, regime_gate
+
+r = load_dataset("../data").index_returns[:1200]
+gate, _ = regime_gate(r, n_states=3, train_min_days=504, refit_days=63, mode="prob")
+banded = apply_gate_band(gate, 0.3)
+raw_travel = np.abs(np.diff(gate)).sum()
+band_travel = np.abs(np.diff(banded)).sum()
+print(f"gate travel {raw_travel:.2f} -> {band_travel:.2f}")   # 69.84 -> 30.75
+assert band_travel < raw_travel
+```
+
+**C++**
+
+```cpp
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <vector>
+#include <regime/pipeline.hpp>
+#include <regime/strategies.hpp>
+
+std::vector<double> r = regime::load_dataset("../data").index_returns;
+r.resize(1200);
+const std::vector<double> gate = regime::regime_gate(r).gate;
+const std::vector<double> banded = regime::apply_gate_band(gate, 0.3);
+double raw_travel = 0.0, band_travel = 0.0;
+for (std::size_t t = 1; t < gate.size(); ++t) {
+    raw_travel += std::abs(gate[t] - gate[t - 1]);
+    band_travel += std::abs(banded[t] - banded[t - 1]);
+}
+std::cout << "gate travel " << raw_travel << " -> " << band_travel << "\n";
+if (band_travel >= raw_travel) throw std::runtime_error("the band did not cut travel");
+```
+
+**Rust**
+
+```rust
+use regime::{apply_gate_band, load_dataset, regime_gate};
+
+let r: Vec<f64> = load_dataset("../data")?.index_returns[..1200].to_vec();
+let (gate, _) = regime_gate(&r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8)?;
+let banded = apply_gate_band(&gate, 0.3)?;
+let travel = |g: &[f64]| g.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>();
+println!("gate travel {:.2} -> {:.2}", travel(&gate), travel(&banded));
+assert!(travel(&banded) < travel(&gate));
+```
+
+**Java**
+
+```java
+import com.quant.regime.Pipeline;
+import com.quant.regime.Strategies;
+import java.nio.file.Path;
+import java.util.Arrays;
+
+double[] r = Arrays.copyOf(Pipeline.loadDataset(Path.of("../data")).indexReturns(), 1200);
+double[] gate = Strategies.regimeGate(r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8).gate();
+double[] banded = Strategies.applyGateBand(gate, 0.3);
+double rawTravel = 0.0, bandTravel = 0.0;
+for (int t = 1; t < gate.length; t++) {
+    rawTravel += Math.abs(gate[t] - gate[t - 1]);
+    bandTravel += Math.abs(banded[t] - banded[t - 1]);
+}
+System.out.printf("gate travel %.2f -> %.2f%n", rawTravel, bandTravel);
+if (bandTravel >= rawTravel) throw new IllegalStateException("the band did not cut travel");
+```
+
+---
+
+## 17. How do I let a warm start recover a zero transition (`transition_floor`)?
+
+EM multiplies the old `A_ij` into the new one, so a transition that reached
+zero stays at zero across warm-started refits. A floor `f > 0` replaces `A`
+by `(A_ij + f) / sum_j (A_ij + f)` before a warm start. It only restarts the
+entry, and EM may drive it back down. A cold start ignores it (API_SPEC 1.3).
+The snippets show the arithmetic on a fitted matrix.
+
+**Python**
+
+```python
+from regime import GaussianHMM, apply_transition_floor, load_dataset
+
+r = load_dataset("../data").index_returns[:800]
+hmm = GaussianHMM(3)
+hmm.fit(r)
+floored = apply_transition_floor(hmm.params.transmat, 1e-3)
+print(f"smallest entry {hmm.params.transmat.min():.3e} -> {floored.min():.3e}")   # 1.942e-36 -> 9.970e-04
+assert floored.min() >= hmm.params.transmat.min()
+warm = GaussianHMM(3, transition_floor=1e-3)     # applied to every warm start
+res = warm.fit(r, init=hmm.params)
+print(f"warm refit: {res.n_iter} iterations, converged={res.converged}")
+```
+
+**C++**
+
+```cpp
+#include <algorithm>
+#include <iostream>
+#include <vector>
+#include <regime/hmm.hpp>
+#include <regime/pipeline.hpp>
+
+std::vector<double> series = regime::load_dataset("../data").index_returns;
+series.resize(800);
+const regime::Matrix r = regime::to_matrix(series);
+regime::GaussianHMM hmm(3);
+hmm.fit(r);
+const regime::Matrix floored = regime::apply_transition_floor(hmm.params().transmat, 1e-3);
+double before = 1.0, after = 1.0;
+for (std::size_t i = 0; i < 3; ++i)
+    for (std::size_t j = 0; j < 3; ++j) {
+        before = std::min(before, hmm.params().transmat(i, j));
+        after = std::min(after, floored(i, j));
+    }
+std::cout << "smallest entry " << before << " -> " << after << "\n";
+regime::GaussianHMM warm(3, 1e-8, 500, 1e-8, /*transition_floor=*/1e-3);
+const regime::HMMFitResult res = warm.fit(r, hmm.params());
+std::cout << "warm refit: " << res.n_iter << " iterations\n";
+```
+
+**Rust**
+
+```rust
+use regime::{apply_transition_floor, load_dataset, GaussianHmm, Matrix};
+
+let series: Vec<f64> = load_dataset("../data")?.index_returns[..800].to_vec();
+let r = Matrix::column(&series);
+let mut hmm = GaussianHmm::new(3, 1e-8, 500, 1e-8)?;
+hmm.fit(&r, None)?;
+let params = hmm.params().expect("fitted").clone();
+let floored = apply_transition_floor(&params.transmat, 1e-3)?;
+let (mut before, mut after) = (1.0_f64, 1.0_f64);
+for i in 0..3 {
+    for j in 0..3 {
+        before = before.min(params.transmat.get(i, j));
+        after = after.min(floored.get(i, j));
+    }
+}
+println!("smallest entry {before:.3e} -> {after:.3e}");
+let mut warm = GaussianHmm::new(3, 1e-8, 500, 1e-8)?.with_transition_floor(1e-3)?;
+let res = warm.fit(&r, Some(&params))?;
+println!("warm refit: {} iterations", res.n_iter);
+```
+
+**Java**
+
+```java
+import com.quant.regime.GaussianHmm;
+import com.quant.regime.HmmFitResult;
+import com.quant.regime.Pipeline;
+import java.nio.file.Path;
+import java.util.Arrays;
+
+double[] r = Arrays.copyOf(Pipeline.loadDataset(Path.of("../data")).indexReturns(), 800);
+GaussianHmm hmm = new GaussianHmm(3, 1e-8, 500, 1e-8);
+hmm.fit(r);
+double[][] floored = GaussianHmm.applyTransitionFloor(hmm.params().transmat, 1e-3);
+double before = 1.0, after = 1.0;
+for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++) {
+        before = Math.min(before, hmm.params().transmat[i][j]);
+        after = Math.min(after, floored[i][j]);
+    }
+System.out.printf("smallest entry %.3e -> %.3e%n", before, after);
+GaussianHmm warm = new GaussianHmm(3, 1e-8, 500, 1e-8, 1e-3);
+HmmFitResult res = warm.fit(r, hmm.params());
+System.out.printf("warm refit: %d iterations%n", res.nIter());
+```
+
+---
+
+## 18. How do I guard the gate against one extreme print (`calm_guard`)?
+
+One extreme return can take a state for itself: its variance sits at the
+floor, it wins the lowest-variance test, and the gate reads a state the chain
+almost never visits, with every fit reporting `converged`. With
+`calm_guard = m > 0`, a refit whose lowest-variance state has stationary
+weight below `m` is recorded in `guard_trips` and repeated on a clipped window
+(API_SPEC 3.3). LEARN section 14 has the decision flow and the measured
+effect. The guard narrows the damage and does not remove it, so clean outliers
+before fitting all the same. The snippets inject -30 % at day 700.
+
+**Python**
+
+```python
+from regime import load_dataset, regime_gate_report
+
+r = load_dataset("../data").index_returns[:1200].copy()
+r[700] = -0.30
+plain = regime_gate_report(r, calm_guard=0.0)
+guarded = regime_gate_report(r, calm_guard=0.01)
+print(f"mean gate {plain.gate[503:].mean():.3f} unguarded, {guarded.gate[503:].mean():.3f} guarded")
+print(f"guard tripped on {len(guarded.guard_trips)} refits, first at t={guarded.guard_trips[0]}")
+assert not plain.guard_trips and guarded.guard_trips
+```
+
+**C++**
+
+```cpp
+#include <iostream>
+#include <numeric>
+#include <stdexcept>
+#include <vector>
+#include <regime/pipeline.hpp>
+#include <regime/strategies.hpp>
+
+std::vector<double> r = regime::load_dataset("../data").index_returns;
+r.resize(1200);
+r[700] = -0.30;
+const regime::RegimeGateResult guarded = regime::regime_gate(
+    r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, /*gate_band=*/0.0,
+    /*transition_floor=*/0.0, /*calm_guard=*/0.01);
+const double mean = std::accumulate(guarded.gate.begin() + 503, guarded.gate.end(), 0.0)
+                    / static_cast<double>(guarded.gate.size() - 503);
+std::cout << "mean gate " << mean << ", " << guarded.guard_trips.size() << " guard trips\n";
+if (guarded.guard_trips.empty()) throw std::runtime_error("the guard did not trip");
+```
+
+**Rust**
+
+```rust
+use regime::{load_dataset, regime_gate_report, GateOptions};
+
+let mut r: Vec<f64> = load_dataset("../data")?.index_returns[..1200].to_vec();
+r[700] = -0.30;
+let options = GateOptions { calm_guard: 0.01, ..GateOptions::default() };
+let guarded = regime_gate_report(&r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, options)?;
+let tail = &guarded.gate[503..];
+let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+println!("mean gate {mean:.3}, {} guard trips", guarded.guard_trips.len());
+assert!(!guarded.guard_trips.is_empty());
+```
+
+**Java**
+
+```java
+import com.quant.regime.Pipeline;
+import com.quant.regime.Strategies;
+import java.nio.file.Path;
+import java.util.Arrays;
+
+double[] r = Arrays.copyOf(Pipeline.loadDataset(Path.of("../data")).indexReturns(), 1200);
+r[700] = -0.30;
+Strategies.GateResult guarded = Strategies.regimeGate(r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8,
+        0.0, 0.0, 0.01);
+double mean = Arrays.stream(guarded.gate(), 503, guarded.gate().length).average().orElseThrow();
+System.out.printf("mean gate %.3f, %d guard trips%n", mean, guarded.guardTrips().length);
+if (guarded.guardTrips().length == 0) throw new IllegalStateException("the guard did not trip");
+```
+
+---
+
+## 19. How do I compare a gate with baselines? (Python)
+
+`regime.evaluation` has no ports: research code stays in the reference. A
+gate multiplies the same scaled book as its baselines, and only days it can
+affect count, so the window starts at `t = 504`. Any gate you test should beat
+at least the unfiltered book and the 21-day vol rule; the constant gate at the
+same mean exposure tells you how much of a result is only lower exposure. The
+bundled seed is favourable to the HMM gate (85th percentile of 100 seeds), and
+the gate failed on real data, so read the output as a demonstration of the
+method.
+
+**Python**
+
+```python
+import numpy as np
+from regime import (build_book, constant_gate, load_dataset, regime_gate,
+                    vol_ratio_gate, window_metrics)
+
+ds = load_dataset("../data")
+book = build_book(ds)
+start = 504
+first_day = start - 1                    # the gate on day t earns day t+1
+n = len(ds.index_returns)
+hmm_gate, _ = regime_gate(ds.index_returns)
+gates = {
+    "unfiltered": np.ones(n),
+    "HMM gate": hmm_gate,
+    "constant": constant_gate(n, float(hmm_gate[first_day:-1].mean()), first_day),
+    "21d vol rule": vol_ratio_gate(ds.index_returns, first_day),
+}
+for name, gate in gates.items():
+    m = window_metrics(book.stream(gate).net(5.0), ds.dates, start)
+    print(f"{name:<13} Sharpe {m['sharpe']:.2f}  maxDD {m['max_dd']:+.2%}")
+# Matches docs/GATE_EVALUATION.md: 0.54, 0.99, 0.54, 0.81
+```
+
+---
+
+## 20. How do I bootstrap a Sharpe difference? (Python)
+
+Two series that share a crisis must be resampled together, in blocks, or the
+interval comes out too narrow. `paired_block_bootstrap` draws one index path
+for both series. The report uses 10000 resamples; 500 keep this snippet fast
+and are too few for a published interval.
+
+**Python**
+
+```python
+import numpy as np
+from regime import build_book, load_dataset, paired_block_bootstrap, regime_gate, vol_ratio_gate
+
+ds = load_dataset("../data")
+book = build_book(ds)
+start = 504
+gate, _ = regime_gate(ds.index_returns)
+gated = book.stream(gate).net(5.0)[start:]
+vol = book.stream(vol_ratio_gate(ds.index_returns, start - 1)).net(5.0)[start:]
+res = paired_block_bootstrap(gated, vol, np.random.default_rng(7), n_boot=500, mean_block=21.0)
+print(f"diff {res.diff:+.3f}  95% [{res.ci_low:+.2f}, {res.ci_high:+.2f}]  P(>0) {res.prob_positive:.0%}")
+# diff +0.186, as in docs/GATE_EVALUATION.md; the interval includes zero
+assert res.ci_low < res.diff < res.ci_high
+```
+
+---
+
+## 21. How do I apply the size-dependent cost model? (Python)
+
+`run_backtest` charges a flat rate, which cannot grow with the book.
+`regime.costs` adds a spread and a square-root impact term and leaves every
+pinned number alone. The spreads, ADV and Y below are the module's illustrative
+defaults, not calibrated values: the bundled instruments have no real volume
+or quotes (`docs/CAPACITY_EVALUATION.md`). No gate is involved here, so the
+snippet is quick.
+
+**Python**
+
+```python
+import numpy as np
+from regime import CostAssumptions, build_book, daily_cost_fraction, load_dataset, participation, sharpe
+from regime.costs import (ILLUSTRATIVE_FX_ADV_USD, ILLUSTRATIVE_FX_HALF_SPREAD_BPS,
+                          ILLUSTRATIVE_IMPACT_Y, ILLUSTRATIVE_TREND_ADV_USD,
+                          ILLUSTRATIVE_TREND_HALF_SPREAD_BPS)
+
+ds = load_dataset("../data")
+book = build_book(ds)
+start = 504
+weights = 0.5 * np.hstack([book.momentum_positions, book.carry_positions])
+returns = np.hstack([book.trend_returns, book.carry_returns])
+n_trend, n_fx = book.trend_returns.shape[1], book.carry_returns.shape[1]
+costs = CostAssumptions(
+    half_spread_bps=np.r_[[ILLUSTRATIVE_TREND_HALF_SPREAD_BPS] * n_trend,
+                          [ILLUSTRATIVE_FX_HALF_SPREAD_BPS] * n_fx],
+    adv_usd=np.r_[[ILLUSTRATIVE_TREND_ADV_USD] * n_trend, [ILLUSTRATIVE_FX_ADV_USD] * n_fx],
+    sigma_daily=returns[start:].std(axis=0),
+    impact_y=ILLUSTRATIVE_IMPACT_Y,
+)
+gross = book.stream(np.ones(len(ds.index_returns))).gross
+for aum in (1e6, 1e9):
+    net = (gross - daily_cost_fraction(weights, aum, costs))[start:]
+    peak = participation(weights, aum, costs)[start:].max()
+    print(f"${aum:,.0f}: net Sharpe {float(sharpe(net)):.2f}, peak participation {peak:.2%}")
+# Matches the Unfiltered table in docs/CAPACITY_EVALUATION.md: 0.67 at $1m, 0.35 at $1bn
+```
+
+---
+
 ## Checking the snippets
 
-`python3 tools/check_cookbook.py` (from the repository root, after
+`python3 tools/check_cookbook.py` runs in CI (from the repository root, after
 `bash cpp/build.sh`, `cargo build --release` in `rust/` and
 `bash java/build.sh`) extracts every fenced block above into a scratch
 directory, wraps the C++/Rust/Java bodies in a `main`, compiles them

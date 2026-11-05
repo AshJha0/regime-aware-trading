@@ -123,7 +123,7 @@ def check_one(lang: str, idx: int, body: str, scratch: Path, verbose: bool) -> b
             ROOT / "java", verbose,
         )
         if ok:
-            ok, out = run(["java", "-cp", f"{classes}:{scratch}", cls], ROOT / "java", verbose)
+            ok, out = run(["java", "-cp", f"{classes}{os.pathsep}{scratch}", cls], ROOT / "java", verbose)
     else:  # pragma: no cover
         raise ValueError(lang)
     status = "OK  " if ok else "FAIL"
