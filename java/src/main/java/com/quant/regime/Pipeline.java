@@ -20,7 +20,8 @@ import java.util.Map;
  * {@link #runFullPipeline} so they can never drift apart.
  *
  * <p>Label conventions (pinned): HMM states are sorted by mean ascending, so
- * on this data state 0 = crisis (lowest mean, highest vol). The bundled true
+ * state 0 has the lowest mean; that need not be the crisis state, which is the
+ * highest-variance state (state 2 on this data). The bundled true
  * states use the generator's ordering (0 = calm-bull, 1 = choppy,
  * 2 = crisis); the pinned volatility mapping of the full-sample K=3 fit (calm
  * to the lowest-variance fitted label, crisis to the highest-variance one)
@@ -42,6 +43,7 @@ public final class Pipeline {
      * @param varFloor EM variance floor
      * @param momentumLookback trailing momentum window (days)
      * @param volTarget annualized per-asset vol target
+     * @param portfolioVolTarget annualized vol target of the combined book
      * @param ewmaLambda EWMA decay for the vol estimate
      * @param leverageCap maximum per-asset leverage
      * @param carryTopN number of carry longs
@@ -58,7 +60,8 @@ public final class Pipeline {
      * @param calmGuard optional calm-state guard weight; absent means 0 (off)
      */
     public record Config(int nStates, double emTol, int emMaxIter, double varFloor,
-            int momentumLookback, double volTarget, double ewmaLambda, double leverageCap,
+            int momentumLookback, double volTarget, double portfolioVolTarget,
+            double ewmaLambda, double leverageCap,
             int carryTopN, int carryBottomN, int rebalanceDays, int trainMinDays, int refitDays,
             String gateMode, double gateThreshold, double costBps, int tradingDays,
             double gateBand, double transitionFloor, double calmGuard) {
@@ -97,6 +100,8 @@ public final class Pipeline {
      * @param gateModels fitted gate models in refit order
      * @param guardTrips refit days on which the calm-state guard tripped
      * @param results backtests keyed momentum/carry x unfiltered/filtered
+     * @param crisisLabel highest-variance state of the K=3 fit (API_SPEC 2.2)
+     * @param portfolioScale portfolio vol scale per day (API_SPEC 3.5)
      * @param combinedNet 50/50 combined net returns keyed unfiltered/filtered
      * @param combinedMetrics metrics of the combined portfolios
      * @param crisis per-strategy state-conditional performance tables
@@ -104,10 +109,50 @@ public final class Pipeline {
     public record Result(Dataset dataset, Config config,
             GaussianHmm hmm2, HmmFitResult fit2, GaussianHmm hmm3, HmmFitResult fit3,
             int[] viterbi3, double[][] smoothed3, double[] stationary3, double viterbiAccuracy,
-            double[] gate, List<GaussianHmm> gateModels, int[] guardTrips,
+            double[] gate, List<GaussianHmm> gateModels, int[] guardTrips, int crisisLabel,
+            double[] portfolioScale,
             Map<String, Backtest.Result> results,
             Map<String, double[]> combinedNet, Map<String, Backtest.Metrics> combinedMetrics,
             Map<String, Backtest.StateStats[]> crisis) {
+    }
+
+    /**
+     * Both sleeves at the portfolio vol scale, before any gate (API_SPEC 3.5).
+     *
+     * @param momentum scaled momentum positions
+     * @param carry scaled carry positions
+     * @param carryReturns carry total returns
+     * @param scale the scale per day
+     */
+    public record ScaledBook(double[][] momentum, double[][] carry, double[][] carryReturns,
+            double[] scale) {
+    }
+
+    /**
+     * Builds the scaled book. The scale comes from the unscaled, ungated book at
+     * the config cost, so every gate multiplies the same book and none is
+     * vol-targeted back up.
+     *
+     * @param ds the dataset
+     * @param cfg the configuration
+     * @return the scaled book
+     */
+    public static ScaledBook scaledBook(Dataset ds, Config cfg) {
+        double[][] mom = Strategies.momentumPositions(ds.trendReturns(), cfg.momentumLookback(),
+                cfg.volTarget(), cfg.ewmaLambda(), cfg.leverageCap());
+        double[][] carry = Strategies.carryPositions(ds.fxRateDiffs(), cfg.carryTopN(),
+                cfg.carryBottomN(), cfg.rebalanceDays());
+        double[][] carryRets = Strategies.carryTotalReturns(ds.fxSpotReturns(), ds.fxRateDiffs());
+        double[] rawMom = Backtest.run(mom, ds.trendReturns(), cfg.costBps(), null).netReturns();
+        double[] rawCarry = Backtest.run(carry, carryRets, cfg.costBps(), null).netReturns();
+        double[] raw = new double[rawMom.length];
+        for (int t = 0; t < raw.length; t++) {
+            raw[t] = 0.5 * rawMom[t] + 0.5 * rawCarry[t];
+        }
+        double[] scale = Strategies.portfolioScale(raw, cfg.portfolioVolTarget(), cfg.ewmaLambda(),
+                cfg.leverageCap(), cfg.momentumLookback());
+        return new ScaledBook(Strategies.applyGate(mom, scale), Strategies.applyGate(carry, scale),
+                carryRets, scale);
     }
 
     /**
@@ -160,7 +205,8 @@ public final class Pipeline {
         Config config = new Config(
                 cfgInt(cfg, "n_states"), cfgDouble(cfg, "em_tol"), cfgInt(cfg, "em_max_iter"),
                 cfgDouble(cfg, "var_floor"), cfgInt(cfg, "momentum_lookback"),
-                cfgDouble(cfg, "vol_target"), cfgDouble(cfg, "ewma_lambda"),
+                cfgDouble(cfg, "vol_target"), cfgDouble(cfg, "portfolio_vol_target"),
+                cfgDouble(cfg, "ewma_lambda"),
                 cfgDouble(cfg, "leverage_cap"), cfgInt(cfg, "carry_top_n"),
                 cfgInt(cfg, "carry_bottom_n"), cfgInt(cfg, "rebalance_days"),
                 cfgInt(cfg, "train_min_days"), cfgInt(cfg, "refit_days"),
@@ -195,7 +241,8 @@ public final class Pipeline {
         Dataset ds = loadDataset(dataDir);
         Config base = ds.config();
         Config cfg = new Config(base.nStates(), base.emTol(), base.emMaxIter(), base.varFloor(),
-                base.momentumLookback(), base.volTarget(), base.ewmaLambda(), base.leverageCap(),
+                base.momentumLookback(), base.volTarget(), base.portfolioVolTarget(),
+                base.ewmaLambda(), base.leverageCap(),
                 base.carryTopN(), base.carryBottomN(), base.rebalanceDays(),
                 trainMinDays != null ? trainMinDays : base.trainMinDays(),
                 refitDays != null ? refitDays : base.refitDays(),
@@ -245,11 +292,10 @@ public final class Pipeline {
         double cost = cfg.costBps();
         LocalDate[] dates = ds.dates();
 
-        double[][] momPos = Strategies.momentumPositions(ds.trendReturns(), cfg.momentumLookback(),
-                cfg.volTarget(), cfg.ewmaLambda(), cfg.leverageCap());
-        double[][] carryPos = Strategies.carryPositions(ds.fxRateDiffs(), cfg.carryTopN(),
-                cfg.carryBottomN(), cfg.rebalanceDays());
-        double[][] carryRets = Strategies.carryTotalReturns(ds.fxSpotReturns(), ds.fxRateDiffs());
+        ScaledBook book = scaledBook(ds, cfg);
+        double[][] momPos = book.momentum();
+        double[][] carryPos = book.carry();
+        double[][] carryRets = book.carryReturns();
 
         Map<String, Backtest.Result> results = new LinkedHashMap<>();
         results.put("momentum_unfiltered", Backtest.run(momPos, ds.trendReturns(), cost, dates));
@@ -274,7 +320,7 @@ public final class Pipeline {
         }
 
         // Crisis table: attribute daily strategy returns to the full-sample
-        // K=3 Viterbi state (state 0 = crisis on this data); the table has k3
+        // K=3 Viterbi state (crisisLabel = highest variance); the table has k3
         // rows regardless of the gate's nStates.
         Map<String, Backtest.StateStats[]> crisis = new LinkedHashMap<>();
         for (Map.Entry<String, Backtest.Result> e : results.entrySet()) {
@@ -287,7 +333,8 @@ public final class Pipeline {
         }
 
         return new Result(ds, cfg, hmm2, fit2, hmm3, fit3, viterbi3, smoothed3, stationary3,
-                viterbiAccuracy, gr.gate(), gr.models(), gr.guardTrips(), results, combinedNet, combinedMetrics, crisis);
+                viterbiAccuracy, gr.gate(), gr.models(), gr.guardTrips(), crisisLabel, book.scale(), results, combinedNet,
+                combinedMetrics, crisis);
     }
 
     // ------------------------------------------------------------------ //
@@ -393,11 +440,10 @@ public final class Pipeline {
         Dataset ds = pipe.dataset();
         Config cfg = pipe.config();
         double[] gate = Strategies.applyGateBand(pipe.gate(), band);
-        double[][] momPos = Strategies.momentumPositions(ds.trendReturns(), cfg.momentumLookback(),
-                cfg.volTarget(), cfg.ewmaLambda(), cfg.leverageCap());
-        double[][] carryPos = Strategies.carryPositions(ds.fxRateDiffs(), cfg.carryTopN(),
-                cfg.carryBottomN(), cfg.rebalanceDays());
-        double[][] carryRets = Strategies.carryTotalReturns(ds.fxSpotReturns(), ds.fxRateDiffs());
+        ScaledBook book = scaledBook(ds, cfg);
+        double[][] momPos = book.momentum();
+        double[][] carryPos = book.carry();
+        double[][] carryRets = book.carryReturns();
         Backtest.Result mom = Backtest.run(Strategies.applyGate(momPos, gate), ds.trendReturns(),
                 cfg.costBps(), ds.dates());
         Backtest.Result carry = Backtest.run(Strategies.applyGate(carryPos, gate), carryRets,

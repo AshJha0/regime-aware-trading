@@ -6,8 +6,9 @@ combined backtests filtered and unfiltered, and computes the crisis-state
 breakdown.  The demo, the golden-value generator, and the golden tests all
 call :func:`run_full_pipeline` so they can never drift apart.
 
-Label conventions (pinned): HMM states are sorted by mean ascending, so on
-this data state 0 = crisis (lowest mean, highest vol).  The bundled true
+Label conventions (pinned): HMM states are sorted by mean ascending, so
+state 0 has the lowest mean; that need not be the crisis state, which is the
+highest-variance state (state 2 on this data).  The bundled true
 states use the generator's ordering (0 = calm-bull, 1 = choppy,
 2 = crisis); the pinned mapping goes through the state volatilities of the
 full-sample K=3 fit (calm-bull -> argmin variance, crisis -> argmax
@@ -21,7 +22,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Mapping
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,7 @@ from .strategies import (
     carry_positions,
     carry_total_returns,
     momentum_positions,
+    portfolio_scale,
     regime_gate_report,
 )
 
@@ -68,7 +70,8 @@ CONFIG_INT_KEYS = (
     "rebalance_days", "train_min_days", "refit_days", "trading_days",
 )
 CONFIG_FLOAT_KEYS = (
-    "em_tol", "var_floor", "vol_target", "ewma_lambda", "leverage_cap", "gate_threshold", "cost_bps",
+    "em_tol", "var_floor", "vol_target", "portfolio_vol_target", "ewma_lambda", "leverage_cap",
+    "gate_threshold", "cost_bps",
 )
 #: Optional keys (API_SPEC 4): absent means 0, which is off.
 CONFIG_OPTIONAL_FLOAT_KEYS = ("gate_band", "transition_floor", "calm_guard")
@@ -91,6 +94,44 @@ def _validate_config(config: Dict) -> None:
                 raise ValueError(f"config.json key '{key}' must be a finite number, got {v!r}")
     if not isinstance(config.get("gate_mode"), str):
         raise ValueError("config.json key 'gate_mode' must be a string")
+
+
+def scaled_book(ds: Dataset, cfg: Mapping) -> Dict[str, np.ndarray]:
+    """Both sleeves at the portfolio vol scale, before any gate (API_SPEC 3.5).
+
+    The scale comes from the unscaled, ungated book at ``cfg["cost_bps"]``, so
+    every gate multiplies the same scaled book and none is vol-targeted back
+    up.  Returns ``momentum`` and ``carry`` positions, ``carry_returns`` and
+    the ``scale`` series.
+    """
+    mom = momentum_positions(
+        ds.trend_returns,
+        lookback=cfg["momentum_lookback"],
+        vol_target=cfg["vol_target"],
+        ewma_lambda=cfg["ewma_lambda"],
+        leverage_cap=cfg["leverage_cap"],
+    )
+    carry = carry_positions(
+        ds.fx_rate_diffs,
+        top_n=cfg["carry_top_n"],
+        bottom_n=cfg["carry_bottom_n"],
+        rebalance_days=cfg["rebalance_days"],
+    )
+    carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs)
+    cost = cfg["cost_bps"]
+    raw = (
+        0.5 * run_backtest(mom, ds.trend_returns, cost).net_returns
+        + 0.5 * run_backtest(carry, carry_rets, cost).net_returns
+    )
+    scale = portfolio_scale(
+        raw, cfg["portfolio_vol_target"], cfg["ewma_lambda"], cfg["leverage_cap"], cfg["momentum_lookback"]
+    )
+    return {
+        "momentum": apply_gate(mom, scale),
+        "carry": apply_gate(carry, scale),
+        "carry_returns": carry_rets,
+        "scale": scale,
+    }
 
 
 def load_dataset(data_dir: str | Path) -> Dataset:
@@ -198,20 +239,8 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
     cost = cfg["cost_bps"]
     dates = ds.dates
 
-    mom_pos = momentum_positions(
-        ds.trend_returns,
-        lookback=cfg["momentum_lookback"],
-        vol_target=cfg["vol_target"],
-        ewma_lambda=cfg["ewma_lambda"],
-        leverage_cap=cfg["leverage_cap"],
-    )
-    carry_pos = carry_positions(
-        ds.fx_rate_diffs,
-        top_n=cfg["carry_top_n"],
-        bottom_n=cfg["carry_bottom_n"],
-        rebalance_days=cfg["rebalance_days"],
-    )
-    carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs)
+    book = scaled_book(ds, cfg)
+    mom_pos, carry_pos, carry_rets = book["momentum"], book["carry"], book["carry_returns"]
 
     results: Dict[str, BacktestResult] = {}
     results["momentum_unfiltered"] = run_backtest(mom_pos, ds.trend_returns, cost, dates)
@@ -226,7 +255,7 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
         combined[tag] = {"net_returns": net, "metrics": compute_metrics(net, dates)}
 
     # Crisis table: attribute daily strategy returns to the full-sample
-    # K=3 Viterbi state (state 0 = crisis on this data); the table has K3
+    # K=3 Viterbi state (crisis_label = highest variance); the table has K3
     # rows regardless of the gate's n_states.
     crisis: Dict[str, Dict] = {}
     for name, res in results.items():
@@ -245,8 +274,10 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
         "smoothed3": smoothed3,
         "stationary3": stationary3,
         "viterbi_accuracy": viterbi_accuracy,
+        "crisis_label": crisis_label,
         "gate": gate,
         "gate_models": gate_models,
+        "portfolio_scale": book["scale"],
         "guard_trips": gate_report.guard_trips,
         "results": results,
         "combined": combined,
@@ -302,7 +333,7 @@ def golden_cases(pipe: Dict) -> List[Dict]:
     )
     case(
         "crisis_momentum_return",
-        {"ann_return": pipe["crisis"]["momentum_unfiltered"][0]["ann_return"]},
+        {"ann_return": pipe["crisis"]["momentum_unfiltered"][pipe["crisis_label"]]["ann_return"]},
         1e-8,
     )
     case(
@@ -316,9 +347,22 @@ def golden_cases(pipe: Dict) -> List[Dict]:
         1e-8,
     )
 
+    # The portfolio vol scale itself (API_SPEC 3.5).
+    scale = pipe["portfolio_scale"]
+    case(
+        "portfolio_scale",
+        {
+            "mean_scale": float(np.mean(scale)),
+            "max_scale": float(np.max(scale)),
+            "scale_t504": scale[504],
+            "scale_t1500": scale[1500],
+        },
+        1e-8,
+    )
+
     # Carry re-ranking on a synthetic panel embedded in `inputs`: the bundled
-    # differentials never cross, so these two cases are the only golden
-    # protection for the rebalance schedule + ranking + accrual + accounting.
+    # basket changes at only two rebalances, so these two cases are the direct
+    # golden protection for the rebalance schedule + ranking + accrual + accounting.
     rerank = carry_rerank_values(CARRY_RERANK_INPUTS)
     cases.append(
         {
@@ -434,20 +478,8 @@ def gate_band_values(pipe: Dict, band: float) -> Dict[str, float]:
     """
     ds, cfg = pipe["dataset"], pipe["config"]
     gate = apply_gate_band(pipe["gate"], band)
-    mom_pos = momentum_positions(
-        ds.trend_returns,
-        lookback=cfg["momentum_lookback"],
-        vol_target=cfg["vol_target"],
-        ewma_lambda=cfg["ewma_lambda"],
-        leverage_cap=cfg["leverage_cap"],
-    )
-    carry_pos = carry_positions(
-        ds.fx_rate_diffs,
-        top_n=cfg["carry_top_n"],
-        bottom_n=cfg["carry_bottom_n"],
-        rebalance_days=cfg["rebalance_days"],
-    )
-    carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs)
+    book = scaled_book(ds, cfg)
+    mom_pos, carry_pos, carry_rets = book["momentum"], book["carry"], book["carry_returns"]
     mom = run_backtest(apply_gate(mom_pos, gate), ds.trend_returns, cfg["cost_bps"], ds.dates)
     carry = run_backtest(apply_gate(carry_pos, gate), carry_rets, cfg["cost_bps"], ds.dates)
     net = 0.5 * mom.net_returns + 0.5 * carry.net_returns

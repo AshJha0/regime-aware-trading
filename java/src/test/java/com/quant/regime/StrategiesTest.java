@@ -443,4 +443,51 @@ public class StrategiesTest {
             }
         }
     }
+
+    @Test
+    public void portfolioScaleFormulaWarmUpAndCap() {
+        double[] net = new double[60];
+        for (int t = 0; t < net.length; t++) {
+            net[t] = 0.002 + 0.0005 * (t % 3);
+        }
+        double[] scale = Strategies.portfolioScale(net, 0.10, 0.94, 4.0, 5);
+        int seedDay = 5 + Strategies.PORTFOLIO_VOL_INIT_DAYS - 1;
+        for (int t = 0; t < seedDay; t++) {
+            assertEquals(1.0, scale[t], 0.0);
+        }
+        double sig2 = 0.0;
+        for (int t = 5; t <= seedDay; t++) {
+            sig2 += net[t] * net[t];
+        }
+        sig2 /= 21.0;
+        assertEquals(Math.min(0.10 / Math.sqrt(252.0 * sig2), 4.0), scale[seedDay], 1e-12);
+        sig2 = 0.94 * sig2 + 0.06 * net[seedDay + 1] * net[seedDay + 1];
+        assertEquals(Math.min(0.10 / Math.sqrt(252.0 * sig2), 4.0), scale[seedDay + 1], 1e-12);
+        assertEquals(4.0, Strategies.portfolioScale(new double[40], 0.10, 0.94, 4.0, 0)[39], 0.0);
+        for (double s : Strategies.portfolioScale(Arrays.copyOf(net, 10), 0.10, 0.94, 4.0, 5)) {
+            assertEquals(1.0, s, 0.0);
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.portfolioScale(net, 0.0, 0.94, 4.0, 5));
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.portfolioScale(net, 0.10, 1.0, 4.0, 5));
+        assertThrows(IllegalArgumentException.class,
+                () -> Strategies.portfolioScale(net, 0.10, 0.94, 0.0, 5));
+    }
+
+    @Test
+    public void portfolioScaleIgnoresTheFuture() {
+        double[] net = new double[200];
+        for (int t = 0; t < net.length; t++) {
+            net[t] = 0.003 * ((t * 7 % 11) - 5.0) / 5.0;
+        }
+        double[] base = Strategies.portfolioScale(net, 0.10, 0.94, 4.0, 20);
+        double[] changed = net.clone();
+        for (int t = 101; t < changed.length; t++) {
+            changed[t] = -3.0 * changed[t] + 0.01;
+        }
+        double[] other = Strategies.portfolioScale(changed, 0.10, 0.94, 4.0, 20);
+        assertArrayEquals(Arrays.copyOf(base, 101), Arrays.copyOf(other, 101), 0.0);
+        assertTrue(base[101] != other[101]);
+    }
 }

@@ -1,0 +1,13 @@
+flowchart TD
+    IDEA["Candidate signal<br/>(here: HMM gate)"] --> BOOK["Same scaled book for every gate<br/>build_book, API_SPEC 3.5"]
+    BOOK --> WIN["Keep only days the gate can affect<br/>window t >= 504"]
+    WIN --> BASE["Compare with baselines<br/>unfiltered, constant at mean gate,<br/>21-day vol rule, EWMA vol rule, oracle"]
+    BASE --> BOOT["Paired stationary block bootstrap<br/>of the Sharpe difference"]
+    BOOT --> COST["Cost sweep, lag sweep,<br/>break-even cost"]
+    COST --> SEEDS["Seed sweep over DGP scenarios<br/>base, half_crisis, vol_only, fat_tails"]
+    SEEDS --> REAL["Real data, pinned configuration<br/>Kenneth French daily, 1963-2026"]
+    REAL --> PASS{"Lower end of the 95% interval<br/>above zero against the vol rule?"}
+    PASS -- "no: the result on 1963-2026" --> STOP["Verdict stands, tuning stops<br/>docs/PREREGISTRATION.md"]
+    PASS -- "yes" --> HOLD["Repeat once on an unseen holdout<br/>with a configuration committed first"]
+    STOP -. "a changed configuration is a new hypothesis" .-> HOLD
+    HOLD --> PUB["Publish the result whatever it shows"]

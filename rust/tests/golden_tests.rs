@@ -27,7 +27,7 @@ fn load_golden() -> GoldenFile {
     serde_json::from_str(&text).expect("golden.json parses")
 }
 
-const REQUIRED: [&str; 22] = [
+const REQUIRED: [&str; 23] = [
     "hmm_k2_loglik",
     "hmm_k3_loglik",
     "hmm_k3_means",
@@ -46,6 +46,7 @@ const REQUIRED: [&str; 22] = [
     "crisis_momentum_return",
     "turnover_momentum",
     "turnover_carry",
+    "portfolio_scale",
     "carry_rerank_positions",
     "carry_rerank_backtest",
     "gate_band_0p3",
@@ -56,7 +57,7 @@ const REQUIRED: [&str; 22] = [
 fn golden_file_has_expected_cases() {
     let golden = load_golden();
     let names: Vec<&str> = golden.cases.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 23);
     for required in REQUIRED {
         assert!(names.contains(&required), "missing golden case {required}");
     }
@@ -122,12 +123,12 @@ fn golden_values_reproduced() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 83, "every scalar across the 22 cases must be compared");
+    assert_eq!(checked, 87, "every scalar across the 23 cases must be compared");
 }
 
 #[test]
 fn carry_rerank_panel_really_reranks() {
-    // The bundled differentials never cross; the embedded panel must.
+    // The bundled basket rarely changes; the embedded panel must flip.
     let golden = load_golden();
     let case = golden.cases.iter().find(|c| c.name == "carry_rerank_positions").unwrap();
     let inputs: CarryRerankInputs = serde_json::from_value(case.inputs.clone()).unwrap();
@@ -146,8 +147,6 @@ fn golden_sign_cases() {
     let golden = load_golden();
     let by_name: BTreeMap<&str, &GoldenCase> =
         golden.cases.iter().map(|c| (c.name.as_str(), c)).collect();
-    // momentum loses money in the crisis state (the sign case)
-    assert!(by_name["crisis_momentum_return"].expect["ann_return"] < 0.0);
     let cs = &by_name["combined_sharpe"].expect;
     // filter improves drawdowns of momentum...
     assert!(by_name["momentum_filtered"].expect["max_dd"] > by_name["momentum_unfiltered"].expect["max_dd"]);

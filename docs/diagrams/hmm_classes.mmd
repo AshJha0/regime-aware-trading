@@ -45,6 +45,8 @@ classDiagram
         +carry_total_returns(spot, diffs)
         +regime_gate(index_returns, ...) gate, models
         +apply_gate(positions, gate)
+        +apply_gate_band(gate, band)
+        +portfolio_scale(net, target, lambda, cap, first_day)
         +forward_step(params, alpha_prev, x_t)
     }
 
@@ -68,6 +70,7 @@ classDiagram
         <<module>>
         +load_dataset(dir) Dataset
         +run_full_pipeline(dir) results
+        +scaled_book(dataset, config)
         +golden_cases(pipe) list
     }
 

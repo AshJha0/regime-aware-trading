@@ -1,6 +1,6 @@
 """Evaluate the HMM regime gate and write docs/GATE_EVALUATION.md.
 
-Two parts.  The first works on the bundled dataset (seed 83): post-warm-up
+Two parts.  The first works on the bundled dataset: post-warm-up
 metrics, baseline gates, paired bootstrap, lag and cost sweeps, break-even
 cost, classification and BIC.  The second re-simulates the DGP for seeds
 1..N under four scenarios and repeats the comparison on each path.
@@ -362,7 +362,13 @@ def render(ref: Dict, results: List[Dict], n_seeds: int) -> str:
         "## Caveats",
         "",
         "- All data is synthetic. The DGP has regimes by construction and its constants were tuned "
-        "on seed 83, so nothing here says the gate works on real markets.",
+        "on an earlier seed, 83, so nothing here says the gate works on real markets.",
+        f"- Seed {REFERENCE_SEED} was picked by a rule fixed in advance: its unfiltered post-warm-up Sharpe is "
+        "the closest to the median of seeds 1 to 100. No gate result entered the choice, so the gate's "
+        "result on this path was not selected. It can still be unusual, and the seed sweep below says where it sits.",
+        "- Every book carries the same portfolio vol scale (10% target), computed from the unfiltered "
+        f"book at {cost:g} bps. A gate multiplies that scaled book. In the cost sweep the cost moves "
+        "and the scale stays fixed; in the lag sweep only the gate is delayed.",
         f"- The bundled window is {ref['window_days']} days, about {years:.1f} years, with "
         f"{cls['n_episodes']} crisis episodes ({cls['n_crisis_days']} crisis days) starting inside it.",
         f"- The seed sweep uses {n_seeds} seeds per scenario. With that count a share has a "
@@ -394,7 +400,8 @@ def render(ref: Dict, results: List[Dict], n_seeds: int) -> str:
     out += [
         f"Carry turnover over the full sample, which adds the day-0 entry and the warm-up, is "
         f"{hmm['carry_turnover_full']:.1f}/yr gated and {unf['carry_turnover_full']:.2f}/yr unfiltered. "
-        "Carry ranks never change on this path, so all of the gated figure comes from the gate moving.",
+        "The portfolio scale moves every day, so carry trades even when its basket does not change; "
+        "the gap between the two figures comes from the gate moving.",
         "",
         "### Paired stationary block bootstrap of the Sharpe difference",
         "",
@@ -503,7 +510,7 @@ def render(ref: Dict, results: List[Dict], n_seeds: int) -> str:
     base = sums["base"]
     d_base = base["col"]("d_unfiltered")
     out[out.index("## Caveats"):out.index("## Caveats")] = [
-        f"Seed {REFERENCE_SEED} is one path, and a light one: {cls['n_episodes']} crisis episodes in the window "
+        f"Seed {REFERENCE_SEED} is one path, with {cls['n_episodes']} crisis episodes in the window "
         f"against a median of {np.median(base['col']('n_episodes')):.0f} across seeds. Over {base['n']} base-DGP "
         f"seeds the gate beats the unfiltered book on {share(d_base)} of paths, mean dSharpe {d_base.mean():+.3f}, "
         f"and beats the trailing vol ratio on {share(base['col']('d_vol'))}, mean dSharpe "

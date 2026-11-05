@@ -306,6 +306,56 @@ pub struct GateOptions {
 /// (1.4826 * MAD).  Pinned, API_SPEC 3.3.
 pub const CALM_CLIP_MADS: f64 = 8.0;
 
+/// Returns seeding the portfolio vol estimate.  Pinned, API_SPEC 3.5.
+pub const PORTFOLIO_VOL_INIT_DAYS: usize = 21;
+
+/// Portfolio-level vol scale of a book (API_SPEC 3.5).
+///
+/// `net` is the realised net return of the unscaled, ungated book.  The scale
+/// is 1 until [`PORTFOLIO_VOL_INIT_DAYS`] returns from `first_day` on are in,
+/// then `min(target / ann_vol, leverage_cap)` on a zero-mean EWMA variance
+/// seeded by their mean square (`leverage_cap` if `ann_vol == 0`).  `scale[t]`
+/// reads `net[..=t]` only.  All ones if the sample is too short.
+///
+/// # Errors
+/// Non-finite `net`, `target <= 0`, `ewma_lambda` outside `(0, 1)` or
+/// `leverage_cap <= 0`.
+pub fn portfolio_scale(
+    net: &[f64],
+    target: f64,
+    ewma_lambda: f64,
+    leverage_cap: f64,
+    first_day: usize,
+) -> Result<Vec<f64>> {
+    if net.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("portfolio_scale: net must be finite".into()));
+    }
+    if !(target.is_finite() && target > 0.0) {
+        return Err(RegimeError::InvalidInput(format!("portfolio_vol_target must be > 0, got {target}")));
+    }
+    if !(ewma_lambda > 0.0 && ewma_lambda < 1.0) {
+        return Err(RegimeError::InvalidInput(format!("ewma lambda must be in (0, 1), got {ewma_lambda}")));
+    }
+    if !(leverage_cap.is_finite() && leverage_cap > 0.0) {
+        return Err(RegimeError::InvalidInput(format!("leverage_cap must be > 0, got {leverage_cap}")));
+    }
+    let mut scale = vec![1.0; net.len()];
+    let seed_day = first_day + PORTFOLIO_VOL_INIT_DAYS - 1;
+    if seed_day >= net.len() {
+        return Ok(scale);
+    }
+    let seed = &net[first_day..=seed_day];
+    let mut sig2 = seed.iter().map(|x| x * x).sum::<f64>() / seed.len() as f64;
+    for t in seed_day..net.len() {
+        if t > seed_day {
+            sig2 = ewma_lambda * sig2 + (1.0 - ewma_lambda) * net[t] * net[t];
+        }
+        let ann_vol = (TRADING_DAYS * sig2).sqrt();
+        scale[t] = if ann_vol > 0.0 { (target / ann_vol).min(leverage_cap) } else { leverage_cap };
+    }
+    Ok(scale)
+}
+
 /// Everything a walk-forward gate run produces.
 #[derive(Debug, Clone)]
 pub struct GateReport {

@@ -33,14 +33,8 @@ import pandas as pd
 
 from .backtest import TRADING_DAYS, compute_metrics, run_backtest
 from .hmm import GaussianHMM
-from .pipeline import Dataset
-from .strategies import (
-    apply_gate,
-    carry_positions,
-    carry_total_returns,
-    ewma_variance,
-    momentum_positions,
-)
+from .pipeline import Dataset, scaled_book
+from .strategies import apply_gate, ewma_variance
 
 #: Generator labels (data/generate_data.py).
 CALM_STATE = 0
@@ -82,7 +76,7 @@ class CombinedStream:
 
 @dataclass
 class GateBook:
-    """Ungated positions and returns of both sleeves.
+    """Ungated positions, at the portfolio vol scale, and returns of both sleeves.
 
     Attributes:
         momentum_positions / trend_returns: Momentum sleeve, shape ``(T, A)``.
@@ -109,24 +103,17 @@ class GateBook:
 
 
 def build_book(ds: Dataset, config: Optional[Mapping] = None) -> GateBook:
-    """Build the ungated book from a dataset with the pipeline's settings."""
-    cfg = ds.config if config is None else config
+    """Build the ungated book at the portfolio vol scale (API_SPEC 3.5).
+
+    The scale is fixed here at the config cost, so a cost sweep moves the cost
+    and not the scale, and every gate multiplies the same scaled book.
+    """
+    book = scaled_book(ds, ds.config if config is None else config)
     return GateBook(
-        momentum_positions=momentum_positions(
-            ds.trend_returns,
-            lookback=cfg["momentum_lookback"],
-            vol_target=cfg["vol_target"],
-            ewma_lambda=cfg["ewma_lambda"],
-            leverage_cap=cfg["leverage_cap"],
-        ),
+        momentum_positions=book["momentum"],
         trend_returns=ds.trend_returns,
-        carry_positions=carry_positions(
-            ds.fx_rate_diffs,
-            top_n=cfg["carry_top_n"],
-            bottom_n=cfg["carry_bottom_n"],
-            rebalance_days=cfg["rebalance_days"],
-        ),
-        carry_returns=carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs),
+        carry_positions=book["carry"],
+        carry_returns=book["carry_returns"],
         dates=ds.dates,
     )
 

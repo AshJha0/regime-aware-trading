@@ -111,7 +111,11 @@ def main() -> int:
     print("on which the gate is 1, so they are not evidence for the gate:")
     print(f"Sharpe ({mu['sharpe']:.2f} -> {mf['sharpe']:.2f}), maxDD ({mu['max_dd']:+.2%} -> {mf['max_dd']:+.2%})")
     print(f"return ({mu['ann_return']:+.2%} -> {mf['ann_return']:+.2%}).")
-    print("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.")
+    print("Seed 19 is favourable to the gate: its post-warm-up Sharpe gain (0.54 -> 0.99)")
+    print("sits at the 85th percentile of 100 seeds, and its 95% interval includes zero.")
+    print("On real US equity data, 1963-2026, the gate lost to the unfiltered book and")
+    print("to a 21-day vol rule, with bootstrap intervals below zero. Tuning has stopped.")
+    print("See docs/REAL_DATA_EVALUATION.md and docs/GATE_EVALUATION.md.")
     return 0
 
 

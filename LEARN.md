@@ -1,11 +1,23 @@
 # LEARN — Market Regimes, Hidden Markov Models, and Regime-Aware Trading
 
-This document teaches the theory behind the `regime` toolkit: why markets
-have regimes, how a hidden Markov model finds them, why the algorithms are
-written the way they are, and what happens when you use the detected
-regimes to gate real strategies. Notation follows
-[`API_SPEC.md`](API_SPEC.md); every worked number is reproduced by the
-code and pinned in `data/golden/golden.json`.
+**The result first.** On real US equity data from 1963 to 2026 the HMM gate
+lost to the unfiltered book and to a 21-day vol rule, with bootstrap intervals
+below zero (section 15, `docs/REAL_DATA_EVALUATION.md`). By the rule in section
+16, tuning has stopped. This guide is now a case study in evaluating a regime
+signal: sections 1 to 9 teach the machinery, which works as specified, and
+sections 10 to 16 teach how to tell whether it earned anything.
+
+The guide is written for two readers: a student meeting these ideas for the
+first time, and a practitioner who wants the formal statement and the evidence.
+Each new idea comes in that order: plain idea, formal statement, worked example.
+Notation follows [`API_SPEC.md`](API_SPEC.md). Worked numbers on the bundled data
+are reproduced by the code and pinned in `data/golden/golden.json`.
+
+**A warning that applies to every bundled gate figure.** The bundled data are
+seed 19 of a synthetic generator, and that seed flatters the gate: its
+post-warm-up Sharpe goes from 0.54 to 0.99, which sits at the 85th percentile of
+100 seeds, and the 95 % interval includes zero. Bundled figures show how the code
+behaves. They are not evidence for the gate.
 
 ---
 
@@ -38,18 +50,22 @@ A two- or three-state description — *calm-bull*, *choppy*, *crisis* — is a
 crude but remarkably effective summary. The empirical signature that any
 model must reproduce: crisis states have **negative mean, high variance,
 and short duration**; calm states have **positive mean, low variance, and
-long duration**. That asymmetry ("stairs up, elevator down") is precisely
-what the bundled data generator builds in and what the fitted HMM
-recovers.
+long duration**. That asymmetry ("stairs up, elevator down") is what the
+bundled generator builds in. The fitted HMM recovers the variances well. It
+does not reliably recover the means: on seed 19 the crisis state's sampled mean
+is positive (section 4.3).
 
 ### Why not just threshold realized volatility?
 
 You could label "high vol" whenever a 20-day realized vol exceeds some
-cutoff. That works, but it is ad hoc (which window? which cutoff?), it
-produces jittery labels near the threshold, and it gives you no
-probabilistic machinery — no likelihood to compare models, no smoothed
-probabilities, no forecast of regime persistence. The HMM gives all of
-that from one coherent generative model.
+cutoff. It is ad hoc (which window? which cutoff?), it produces jittery labels
+near the threshold, and it gives you no likelihood to compare models, no
+smoothed probabilities and no forecast of regime persistence. The HMM gives all
+of that from one generative model.
+
+That is an argument about description, and it does not carry over to trading. On
+real data a 21-day vol rule beat the HMM gate (section 15). Always keep the
+simple rule in the comparison.
 
 ---
 
@@ -74,18 +90,19 @@ $$
 E[\text{duration}] = \frac{1}{1 - A_{ii}}.
 $$
 
-The fitted crisis state on the bundled data has $A_{00} \approx 0.9204$,
-an expected duration of about $1/(1-0.9204) \approx 12.6$ trading days —
-short and violent, exactly as it should be. The calm state's
-$A_{11} \approx 0.9916$ implies a ~118-day expected stay.
+The fitted crisis state on the bundled data (state 2, the highest-variance
+state) has $A_{22} \approx 0.9352$, an expected duration of about
+$1/(1-0.9352) \approx 15.4$ trading days. The calm state's
+$A_{11} \approx 0.9809$ implies a stay of about 52 days.
 
 A chain that can reach every state from every state has a unique
 **stationary distribution** $\pi^\*$ solving $\pi^\* A = \pi^\*$ — the
 long-run fraction of time spent in each state. The toolkit computes it by
 the pinned power method (start uniform, iterate $\pi \leftarrow \pi A$,
 renormalize by the L1 sum, stop when the max change is below $10^{-13}$).
-On the bundled data: $\pi^\* \approx (0.0566,\ 0.6767,\ 0.2667)$ — the
-market spends ~5.7% of its life in crisis.
+On the bundled data: $\pi^\* \approx (0.2455,\ 0.6204,\ 0.1341)$ for states
+(choppy, calm, crisis), so the fitted market spends about 13 % of its life in
+crisis.
 
 ### 2.2 Hiding the chain: emissions
 
@@ -149,7 +166,7 @@ $$
 Each step multiplies by a transition probability ($<1$) and an emission
 density. A typical daily-return density value is $O(10)$–$O(100)$ (the
 density of a $\mathcal N(0, 0.006^2)$ at its mode is ~66), but the
-*product* over 2000 days is $e^{\log L}$ with $\log L \approx 6886$ on the
+*product* over 2000 days is $e^{\log L}$ with $\log L \approx 6643$ on the
 bundled data — fine — while for a poorly matched state the per-step factor
 can be astronomically small: a $-10\%$ return under a calm state with
 $\sigma = 0.006$ has density $e^{-139}$. Raw $\alpha_t(i)$ therefore
@@ -258,8 +275,8 @@ having come from state $i$. The variance update uses the **new** means
 Each iteration provably does not decrease the log-likelihood (Jensen's
 inequality on the EM lower bound); `test_em_monotonic_on_bundled_data`
 asserts it numerically. Convergence is declared when the improvement drops
-below $10^{-8}$; on the bundled index, K=2 converges in 27 E-steps and K=3
-in 63. Because the guarantee is a theorem, the implementation treats a
+below $10^{-8}$; on the bundled index, K=2 converges in 23 E-steps and K=3
+in 71. Because the guarantee is a theorem, the implementation treats a
 *decrease* larger than $10^{-6}\max(1, |\log L|)$ as a numerical fault:
 EM stops and reports `converged = False, monotone = False` rather than
 mistaking the tiny "improvement" for convergence (pinned in API_SPEC 1.4).
@@ -295,7 +312,9 @@ choices in this toolkit deal with that:
   better optima occasionally, at the price of irreproducibility.
 * **Post-fit label sorting**: after EM finishes (once, never during
   iterations), states are permuted so means are ascending on dimension 0.
-  State 0 = lowest mean, which on the bundled data is the crisis state.
+  State 0 = lowest mean. A label therefore says nothing about risk: on the
+  bundled data state 0 is the choppy regime, and crisis is whichever state has
+  the highest variance, here state 2.
 
 Failure modes to know: a state can collapse onto a handful of points
 (variance $\to 0$, likelihood $\to \infty$ — the classic Gaussian-mixture
@@ -316,27 +335,29 @@ Full-sample K=3 fit on `market_index.csv` (2000 days), daily units:
 
 | state | label | mean | std | annualized mean | annualized vol |
 |---|---|---|---|---|---|
-| 0 | crisis | $-0.003432$ | $0.025804$ | $-86.5\%$ | $41.0\%$ |
-| 1 | calm-bull | $+0.000635$ | $0.005792$ | $+16.0\%$ | $9.2\%$ |
-| 2 | choppy | $+0.001040$ | $0.010580$ | $+26.2\%$ | $16.8\%$ |
+| 0 | choppy | $-0.000158$ | $0.010114$ | $-4.0\%$ | $16.1\%$ |
+| 1 | calm-bull | $+0.000536$ | $0.006059$ | $+13.5\%$ | $9.6\%$ |
+| 2 | crisis | $+0.002654$ | $0.024373$ | $+66.9\%$ | $38.7\%$ |
 
-with $\log L = 6886.4498$ and transition matrix (rows sum to 1)
+with $\log L = 6643.0767$ and transition matrix (rows sum to 1)
 
 $$
 A \approx \begin{pmatrix}
-0.9204 & 0.0000 & 0.0796\\
-0.0008 & 0.9916 & 0.0076\\
-0.0148 & 0.0214 & 0.9637
+0.9327 & 0.0319 & 0.0354\\
+0.0191 & 0.9809 & 0.0000\\
+0.0347 & 0.0301 & 0.9352
 \end{pmatrix}.
 $$
 
-Note that the generator's truth was $\mu = (0.0007, 0.0, -0.0018)$ and
-$\sigma = (0.006, 0.011, 0.025)$ for calm/choppy/crisis: EM recovered the
-volatilities almost exactly and the means roughly (means of noisy daily
-returns are intrinsically hard to estimate — a theme that returns in
-Section 10). Also note $A_{01} \approx 10^{-9}$: the fitted crisis state
-never exits directly into deep calm; it decompresses through the choppy
-state first. Real markets do the same.
+The generator's truth was $\mu = (0.0007, 0.0, -0.0018)$ and
+$\sigma = (0.006, 0.011, 0.025)$ for calm/choppy/crisis. EM recovered the
+volatilities closely. It missed the means, and the crisis mean has the wrong
+sign: the true drift is negative, while the fitted mean on this path is
+$+66.9\%$ annualized. Means of noisy daily returns are intrinsically hard to
+estimate, a theme that returns in Section 17. This is why crisis is identified
+by $\arg\max$ of the variance and never by the mean. Note also
+$A_{12} \approx 4 \times 10^{-12}$: the fitted calm state never jumps straight
+into crisis, and goes through the choppy state first.
 
 ---
 
@@ -359,10 +380,10 @@ lower state index (pinned, so all languages produce the identical path).
 On the worked example above, the best path is $(0, 1, 1)$ with path
 probability $4.410 \times 10^{-3}$ — verified by enumerating all 8 paths.
 On the bundled data the full-sample K=3 Viterbi path spends
-$(99, 1372, 529)$ days in states $(0, 1, 2)$ (exact golden integers) and
-agrees with the (volatility-mapped) true generator states on **94.85%** of
-days — a teaching number showing that with well-separated states, regime
-recovery works well *in hindsight*.
+$(377, 1397, 226)$ days in states $(0, 1, 2)$ (exact golden integers) and
+agrees with the (volatility-mapped) true generator states on **90.45%** of
+days. That is a teaching number: it is in-sample and uses hindsight, on data
+generated from the model being fitted.
 
 The subtlety: the Viterbi path is not the sequence of per-day argmaxes of
 $\gamma_t$. The path respects transition costs; the marginals do not, and
@@ -389,8 +410,8 @@ vs 2). On the bundled index:
 
 | K | $\log L$ | p | AIC | BIC |
 |---|---|---|---|---|
-| 2 | 6831.0255 | 7 | $-13648.05$ | $-13608.84$ |
-| 3 | 6886.4498 | 14 | $-13744.90$ | $-13666.49$ |
+| 2 | 6612.4532 | 7 | $-13210.91$ | $-13171.70$ |
+| 3 | 6643.0767 | 14 | $-13258.15$ | $-13179.74$ |
 
 Both criteria prefer $K = 3$ — correctly, since the generator truly has
 three states. In real data the choice is murkier: information criteria for
@@ -415,8 +436,7 @@ Pedersen, 2017). Behavioral stories: initial underreaction to news
 (anchoring), later herding, and non-profit-seeking flows (hedgers, central
 banks). Its famous property is **crisis alpha in slow bear markets**
 (short positions have time to build) but poor performance in sharp
-V-shaped reversals — a 252-day signal is still long after a two-week
-crash, which is exactly what the crisis-state attribution table shows.
+V-shaped reversals: a 252-day signal is still long after a two-week crash.
 
 ### 7.2 The pinned implementation
 
@@ -456,12 +476,30 @@ asset count so the *book* is equal-risk-budgeted. These are configuration
 choices made for a readable teaching study, not a replication of the
 paper's numbers.
 
-On the bundled data, unfiltered momentum earns +3.38% ann. at 4.14% vol
-(Sharpe 0.81, maxDD $-10.5\%$) — but $-8.77\%$ annualized inside the
-decoded crisis state (a golden sign case). All such numbers are
-full-sample: the first 251 days carry no momentum position at all, which
-understates the from-first-trade Sharpe by roughly
-$1/\sqrt{1 - 251/2000} \approx 6.5\%$ relative.
+On the bundled data, unfiltered momentum at the portfolio scale earns +9.23%
+ann. at 11.04% vol (Sharpe 0.84, maxDD $-25.22\%$), and +14.21% annualized inside
+the decoded crisis state. That sign is a property of this path, which is why no
+golden case asserts it any longer. All such numbers are full-sample: the first
+251 days carry no momentum position at all, which understates the
+from-first-trade Sharpe by roughly $1 - \sqrt{1 - 251/2000} \approx 6.5\%$
+relative.
+
+### 7.3 The portfolio vol target
+
+**The plain idea.** Sizing each asset to 10 % does not make the book 10 %,
+because the assets diversify. So one more scale sets the level of the whole book.
+
+**Formally** (API_SPEC 3.5). Let $u_t$ be the net return of the unscaled, ungated
+combined book. With a zero-mean EWMA variance $\sigma^2_t$ of $u$, seeded by the
+21 returns from day 252 on,
+$\text{scale}_t = \min(0.10 / \sqrt{252\,\sigma^2_t},\ 4)$, and the traded book is
+$\text{gate}_t \cdot \text{scale}_t \cdot P_t$. The scale reads $u$ through day
+$t$ only and is always the one from the *unfiltered* book. A scale measured on
+the gated book would see lower volatility and lever back up, undoing the gate.
+
+**Worked example.** Unscaled, the combined book on seed 19 runs at 4.67 % a year.
+The scale averages 2.32, reaches its cap of 4, and takes the unfiltered book to
+9.86 %. The scale moves every day, so it adds real turnover (section 13.1).
 
 ---
 
@@ -496,9 +534,9 @@ Sharpe is blind to skew.
 
 The bundled generator builds this in literally: spot drift per unit of
 relative differential is $+0.75$ in calm, $+0.2$ in choppy, and $-12$ in
-crisis (the unwind). The result in the crisis-attribution table: carry
-earns +10.1%/+16.7% annualized in calm/choppy states and **loses 11.1%**
-annualized in crisis.
+crisis (the unwind). The result in the crisis-attribution table on seed 19:
+unfiltered carry earns +21.78% annualized in the calm state, loses 6.28% in the
+choppy state and **loses 69.62%** annualized in the crisis state.
 
 ### 8.3 The pinned implementation
 
@@ -509,19 +547,17 @@ at $+1/3$ each, short the bottom 3 at $-1/3$ each; hold in between. Traded
 return on day $t$ is $\text{spot}_t + \text{diff}_{t-1}/252$ — the
 differential accrued is the one *set at the previous close* (known in
 advance; day 0 accrues nothing) — a simple-interest approximation with no
-forward points and no compounding. Result: +10.77% ann., Sharpe 1.58,
-maxDD $-10.0\%$ unfiltered.
+forward points and no compounding. Result at the portfolio scale: +6.16% ann.,
+Sharpe 0.36, maxDD $-61.13\%$ unfiltered.
 
 **Be honest about what the bundled data exercise.** The generator's
-differentials are Ornstein-Uhlenbeck around bases that sit at least 1.5
-percentage points apart with noise of 0.0004 per day, so in 2000 days the
-six differentials *never change rank order*: the basket built on day 0 is
-held for the whole sample, and the golden `turnover_carry` is exactly
-$2/2000$. The 21-day rebalance and the ranking tie-break are real and
-pinned, but on this data they never move the book; they are exercised
-and golden-pinned instead by the synthetic `carry_rerank_*` panel
-(API_SPEC 5), whose ranks cross at day 10, re-rank at day 21 and tie at
-day 42.
+differentials are Ornstein-Uhlenbeck around well-separated bases, so on this
+path they change rank order on only 36 days and the basket changes on only 2.
+The 21-day rebalance and the ranking tie-break are real and pinned, but they
+barely move the book here. They are exercised and golden-pinned instead by the
+synthetic `carry_rerank_*` panel (API_SPEC 5), whose ranks cross at day 10,
+re-rank at day 21 and tie at day 42. Carry turnover on the bundled data comes
+almost entirely from the portfolio scale.
 
 **Market-convention note (equity vs FX).** Equity regimes are usually
 detected on index returns (as here); FX carry practitioners watch rate
@@ -562,41 +598,34 @@ trades more smoothly and avoids threshold-flapping turnover.
 
 ### 9.2 What filtering does — and what it costs
 
-Golden results on the bundled data (5 bps costs; full sample of 2000
-days, which includes 251 flat momentum days before the first lookback
-window and 503 gate = 1 days before the first walk-forward fit; Sharpe
-is raw, i.e. no risk-free rate is subtracted and volatility is the
-population estimate):
+Golden results on the bundled data (5 bps costs; full sample of 2000 days, which
+includes 251 flat momentum days and 503 days with the gate at 1; Sharpe is raw,
+with no risk-free rate subtracted and population volatility). **These figures
+are full-sample, seed 19 is favourable to the gate, and on real data the gate
+failed**, so read this table as an output of the code:
 
 | strategy | ann ret | Sharpe | maxDD |
 |---|---|---|---|
-| momentum unfiltered | +3.38% | 0.815 | $-10.48\%$ |
-| momentum filtered | +3.33% | 1.040 | $-7.37\%$ |
-| carry unfiltered | +10.77% | 1.579 | $-10.01\%$ |
-| carry filtered | +6.43% | 1.493 | $-4.95\%$ |
-| combined unfiltered | +7.07% | 1.800 | $-5.23\%$ |
-| combined filtered | +4.88% | 1.866 | $-3.41\%$ |
+| momentum unfiltered | +9.23% | 0.84 | $-25.22\%$ |
+| momentum filtered | +6.06% | 0.69 | $-21.95\%$ |
+| carry unfiltered | +6.16% | 0.36 | $-61.13\%$ |
+| carry filtered | +11.37% | 0.94 | $-17.43\%$ |
+| combined unfiltered | +7.70% | 0.78 | $-36.08\%$ |
+| combined filtered | +8.72% | 1.21 | $-15.20\%$ |
 
-The mechanism: both strategies make their money in calm/choppy states and
-lose in crisis, so scaling exposure by $P(\text{calm})$ cuts most of the
-crisis losses (crisis-state combined return improves from $-9.9\%$ to
-$-0.9\%$ annualized) while also cutting *some* good exposure — the gate
-is below 1 plenty of the time, and it reacts with a lag. Net effect over
-the full sample: **total return falls** (7.07% → 4.88%), volatility and
-drawdown fall *faster*, so **risk-adjusted metrics improve** (Sharpe
-1.80 → 1.87, maxDD $-5.2\%$ → $-3.4\%$, Calmar 1.35 → 1.43). Those
-full-sample figures flatter the gate, because it is 1 for the first 503
-days. On the days it can affect, Sharpe falls from 1.49 to 1.35 at 5 bps,
-and a constant 60 % position matches the drawdown with no signal at all.
-The economic argument for filtering is that lower drawdown can be
-re-levered into return, but that needs a risk-adjusted gain to re-lever,
-and `docs/GATE_EVALUATION.md` finds none that a simple volatility rule
-lacks.
+The mechanism on this path: carry is where the crisis losses are, so scaling by
+$P(\text{calm})$ moves crisis-state combined return from $-27.70\%$ to $+0.36\%$
+annualized. Momentum made money in the crisis state here, so the gate cost it
+return and Sharpe. The gate lags, and it is below 1 in the choppy state as well.
 
-Carry shows the trade-off starkest: its unfiltered Sharpe (1.58) barely
-changes filtered (1.49) but its drawdown halves — the filter converts a
-negatively skewed return stream into a much less scary one at the price of
-40% of the return.
+The right window is the one the gate can affect. There, Sharpe goes from 0.54 to
+0.99 with a 95 % interval of [-0.13, 1.05], which sits at the 85th percentile of
+seeds. Across 100 seeds the mean gain is +0.063, and the gate beats the 21-day
+vol rule on 49 % of paths. On real data it lost (section 15).
+
+A common argument for filtering is that lower drawdown can be re-levered into
+return. That needs a risk-adjusted gain to re-lever, and the evidence above does
+not show one.
 
 ### 9.3 Lookahead bias
 
@@ -627,7 +656,330 @@ re-read the past under future parameters.
 
 ---
 
-## 10. Honest limitations
+## 10. Why full-sample results mislead
+
+**The plain idea.** A gate that is switched off for part of the sample cannot
+win or lose on those days, yet they still count in a full-sample Sharpe. The
+gated and unfiltered books are the same book on those days, and that shared
+stretch can move the comparison in either direction.
+
+**Formally.** Let $W$ be the days a gate can affect. Here the first fit is at
+$t_0 = 503$, the gate is 1 before it, and the gate on day $t$ earns day $t+1$, so
+$W = \{t \ge 504\}$. A Sharpe ratio is not additive across periods: it is a mean
+over a standard deviation, and both pool the warm-up with $W$. The gated book
+has lower volatility inside $W$ and the same volatility outside it, so the
+pooled figure weights the two stretches differently for the two books. The
+only comparison that tests the gate is the one restricted to $W$.
+
+**Worked example, using historical figures.** These numbers come from the
+earlier bundled data, seed 83, before the portfolio scale existed. They are
+kept because the effect is clearest there, and they describe no current file.
+
+| Seed 83 (historical), 5 bps | Unfiltered | Gated |
+|---|---|---|
+| Full sample, 2000 days | 1.80 | 1.87 |
+| Days the gate can affect, 1496 days | 1.49 | 1.35 |
+
+The full-sample figures show a gain. On the days the gate could affect it lost
+0.14 of Sharpe, with a 95 % bootstrap interval of [-0.85, 0.58]. The sign flipped
+because of the 503 warm-up days on which the gate was 1. Version 1 quoted the
+first row as its headline, which is why this section exists.
+
+The same split on the current seed 19 (`docs/GATE_EVALUATION.md`) gives 0.78 to
+1.21 on the full sample and 0.54 to 0.99 after warm-up. The sign agrees this
+time, and the gate's result is still flattered, for the separate reason in
+section 11.3. Agreement on one path says nothing about whether the artefact is
+present on the next one, so report the restricted window every time.
+
+Momentum has a smaller version of the same effect: its first 251 days hold no
+position, so a full-sample momentum Sharpe understates the from-first-trade
+figure by about $1 - \sqrt{1 - 251/2000}$ in relative terms.
+
+---
+
+## 11. Judging a signal
+
+Three questions, in order. Does it beat something simple? Is the gap larger
+than noise? Does it survive on other paths?
+
+### 11.1 Baselines
+
+**The plain idea.** A gate that holds 60 % of a book on average will have lower
+drawdown than the whole book, whatever it knows. So compare it with rules that
+need no model.
+
+**Formally.** All gates multiply the same scaled book (API_SPEC 3.5) and are
+measured on the same window at the same cost:
+
+* unfiltered: gate 1;
+* constant at mean gate: the HMM gate's own average, known only in hindsight, so
+  it is a control and not a tradable rule;
+* 21-day vol ratio and EWMA vol ratio: free rules from trailing volatility;
+* next-day oracle: knows tomorrow's true state, so it gives a ceiling and uses
+  look-ahead on purpose.
+
+**Worked example** (seed 19, $t \ge 504$, 5 bps, `docs/GATE_EVALUATION.md`;
+seed 19 is favourable to the gate, see 11.3):
+
+| Gate | Mean exposure | Sharpe | Return | Max DD |
+|---|---|---|---|---|
+| Unfiltered | 1.000 | 0.54 | 5.64% | -36.08% |
+| HMM gate | 0.625 | 0.99 | 7.02% | -15.20% |
+| Constant at mean gate | 0.625 | 0.54 | 3.52% | -24.15% |
+| Trailing 21d vol ratio | 0.881 | 0.81 | 7.62% | -26.27% |
+| Next-day oracle (look-ahead) | 0.886 | 1.23 | 11.01% | -23.33% |
+
+A constant gate has the same Sharpe as the unfiltered book up to costs, because
+scaling a return stream changes mean and volatility alike. Its drawdown row
+shows how much of the gate's lower drawdown is exposure: more than half the way from
+-36.08% to -15.20% is available with no signal.
+
+### 11.2 Paired block bootstrap
+
+**The plain idea.** Two books that share a crisis are not independent, and daily
+returns cluster in volatility. Resampling days one at a time, or each book
+separately, destroys both facts and gives an interval that is too narrow.
+
+**Formally.** The stationary bootstrap of Politis and Romano (1994) draws blocks
+with geometric lengths of mean $b$, wrapping at the end of the sample. Paired
+means the two series use the same index path $\iota$ on each resample, and the
+statistic is
+$\widehat{\Delta}^{*} = \mathrm{Sharpe}(a_\iota) - \mathrm{Sharpe}(b_\iota)$. The
+interval is the percentile interval of $\widehat{\Delta}^{*}$.
+`paired_block_bootstrap` implements this (COOKBOOK recipe 20).
+
+**Worked example.** The gate minus unfiltered on seed 19 is +0.456, and with
+mean block 21 and 10000 resamples the 95 % interval is [-0.13, 1.05], with 93.6 %
+of resamples positive. Blocks of 10 and 63 days give [-0.08, 1.02] and
+[-0.20, 1.10]. A difference of nearly half a Sharpe point on 5.9 years cannot be
+told from zero. Against the 21-day vol rule it is +0.186, [-0.21, 0.59].
+
+### 11.3 Seed sweeps
+
+**The plain idea.** A bootstrap resamples the one path you have. It cannot tell
+you the path is unusual. On simulated data you can draw new paths, so do.
+
+**Formally.** Rerun the study over seeds 1 to 100 per scenario and report the
+share of paths on which the gate wins, with a Wilson interval, plus the mean
+difference and its standard deviation. Change the generator too, because a
+gate can depend on one feature of it: `vol_only` removes regime drifts,
+`half_crisis` halves crisis drifts, `fat_tails` uses Student-t(4) shocks.
+
+**Worked example** (`docs/GATE_EVALUATION.md`, window $t \ge 504$, 5 bps):
+
+| Scenario | P(beats unfiltered) | P(beats 21d vol) | Mean dSharpe vs unfiltered | Mean dSharpe vs vol |
+|---|---|---|---|---|
+| base | 66% [56%, 75%] | 49% [39%, 59%] | +0.063 | -0.110 |
+| half_crisis | 70% [60%, 78%] | 46% [37%, 56%] | +0.034 | -0.162 |
+| vol_only | 19% [13%, 28%] | 7% [3%, 14%] | -0.225 | -0.234 |
+| fat_tails | 12% [7%, 20%] | 4% [2%, 10%] | -0.385 | -0.498 |
+
+Seed 19's post-warm-up gain of +0.456 sits at the 85th percentile of the base
+sweep, against a mean of +0.063. Seed 19 was chosen by a rule on the *unfiltered*
+Sharpe alone (API_SPEC 4), so nobody selected it for the gate, and it still
+happens to flatter the gate. That is why every bundled gate figure in this
+project carries a warning.
+
+---
+
+## 12. Detection is not profit
+
+**The plain idea.** A detector can be right about the regime and still lose
+money, because what pays is not the label. It pays to be out on the days
+returns are bad, and only if being out costs less than it saves.
+
+**Formally.** Classification scores compare $p_t$ with the true state $s_t$.
+P&L depends on $\sum_t g_{t-1}\, r_t$ minus costs. The two agree only if returns
+differ by state by more than the lag, the false alarms and the turnover take
+away.
+
+**Worked example.** On seed 19 the filtered gate classifies calm against not
+calm with accuracy 88.4 % against a majority class of 67.5 %, AUC 0.929, and
+crisis against the rest with AUC 0.962. It missed 0 of 13 crisis episodes
+(`docs/GATE_EVALUATION.md`). The next-day oracle reaches Sharpe 1.23 at exposure
+0.886 while the gate holds 0.625: the gate is $P(\text{calm})$, so it also cuts
+exposure in the choppy state, which is not where the losses are.
+
+The seed sweep isolates this. In `vol_only`, where regimes change volatility
+but not drift, mean crisis AUC is still 0.926 and the gate beats the unfiltered
+book on only 19 % of paths. Detection held, and the profit went with the drift.
+The generator gave crises a large negative drift, so the base scenario rewards
+detection by construction. Whether real crises do the same is an empirical
+question, and section 15 has the answer for this gate.
+
+---
+
+## 13. Turnover, break-even and the band
+
+### 13.1 Where the turnover comes from
+
+**The plain idea.** A probability moves every day, so a book multiplied by it
+trades every day. The portfolio scale also moves every day, so even the
+unfiltered book now trades.
+
+**Formally.** With $P_t = g_t\, s_t\, Q_t$, for gate $g$, scale $s$ and raw
+positions $Q$, turnover is $\sum_a |P_{t,a} - P_{t-1,a}|$ and the net return is
+$\text{gross}_t - c\,\text{turnover}_t$ for $c$ in return units per unit traded.
+
+**Worked example.** Raw carry on the bundled data trades 0.588 times its
+notional per year, because the basket changes on only 2 days. With the portfolio
+scale the same book trades 34.38 times a year over the full sample, and with the
+gate 83.2 times. On the post-warm-up window the combined book turns over 36.8
+times unfiltered and 73.9 times gated, so at 5 bps the gate adds about 1.9 % a
+year of cost ($0.0005 \times (73.9 - 36.8)$). The scale is real turnover and it
+is charged: it is not free risk management.
+
+### 13.2 Break-even cost
+
+**Formally.** The break-even cost is the $c$ at which the gated Sharpe equals the
+comparison. Since net returns are linear in $c$ this is a root search
+(`break_even_cost`, `gate_break_even`).
+
+**Worked example.** On seed 19 the gate's Sharpe advantage disappears at 11.54 bps
+if both books pay the same cost, and at 9.35 bps if the unfiltered book is held
+at its 5 bps Sharpe. The seed sweep's median is 10.44 bps, over the 83 of 100
+paths where the lines cross; on 17 paths the gate had already lost at 0 bps. With
+fat tails the median falls to 2.49 bps. The gated Sharpe drops from 1.52 at 0 bps
+to 0.99 at 5 bps and -0.57 at 20 bps, while the unfiltered book goes from 0.71 to
+0.54 to 0.01.
+
+Flat basis points do not grow with size. `regime.costs` adds a spread and a
+square-root impact term, and `docs/CAPACITY_EVALUATION.md` shows the shape of the
+curve. Its inputs are illustrative, not calibrated, so its dollar figures are
+not a capacity estimate.
+
+### 13.3 The no-trade band
+
+**The plain idea.** Ignore gate moves too small to be worth trading.
+
+**Formally** (API_SPEC 3.3):
+$o_t = g_t$ if $|g_t - o_{t-1}| > \text{band}$, else $o_t = o_{t-1}$. The rule is
+causal, and a band of 0 returns the gate unchanged.
+
+**Worked example.** On the bundled data a band of 0.3 takes full-sample gated
+carry turnover from 83.2 to 45.7 a year. It cannot go lower, because the
+portfolio scale keeps trading. Over 50 base seeds (`docs/BAND_EVALUATION.md`):
+
+| Band | Mean Sharpe | Turnover/yr | P(beats banded vol) |
+|---|---|---|---|
+| 0.0 | 0.67 | 52.6 | 52% [39%, 65%] |
+| 0.3 | 0.77 | 33.1 | 64% [50%, 76%] |
+| 0.5 | 0.80 | 23.2 | 70% [56%, 81%] |
+
+Each row is a separate band, so reading off the best is selection: five bands
+were tried and none was tested out of sample. On real data a band of 0.3
+narrowed the loss to the vol rule and did not close it (section 15). `gate_band`
+stays off by default.
+
+---
+
+## 14. Fat tails, outlier capture and `calm_guard`
+
+### 14.1 Fat tails
+
+**The plain idea.** A Gaussian state has almost no room for a large return, so
+the filter reads one fat-tailed day as a change of regime, and the gate jumps.
+
+**Formally.** The filter update weights state $i$ by $b_i(x_t)$, and
+$\log b_i(x)$ falls with the square of $x$. Under a Student-t(4) shock a large
+$|x|$ is ordinary inside a single regime, but the Gaussian likelihood ratio
+between a low- and a high-variance state grows without bound in $x^2$.
+
+**Worked example.** In the `fat_tails` scenario mean Sharpe falls to 0.10 for the
+gate against 0.49 unfiltered, and the gate beats the unfiltered book on 12 % of
+paths. Turnover is the visible mechanism: 111.2 a year at band 0 over 50 seeds,
+against 52.6 in the base scenario. Mean crisis AUC stays at 0.901. Student-t
+emissions are the standard response. That experiment was conditional and was
+skipped when work stopped under the rule in section 16.
+
+### 14.2 Outlier capture
+
+**The plain idea.** One corrupt or extreme print can claim a whole state for
+itself. That state then has the smallest variance, so it is picked as "calm",
+and the gate reads the probability of a state the chain almost never visits.
+Every fit still reports `converged`.
+
+**Formally.** With `calm_guard = m > 0` (API_SPEC 3.3), a refit whose
+lowest-variance state has stationary weight $\pi_{k_0} < m$ trips the guard: the
+day goes into `guard_trips`, the window is clipped to
+$\text{median} \pm 8 \times 1.4826 \times \text{MAD}$ for the fit and that refit's
+filter pass, and $k^\*$ is the lowest-variance state with $\pi_k \ge m$. Backtests
+and forward steps still use true returns. The flow is drawn in
+`docs/diagrams/calm_guard_flow.mmd`.
+
+**Worked example** (bundled data, $m = 0.01$, mean gate from $t_0$ on; clean run
+0.624 with no trips):
+
+| Injected return | No guard | Guard on | Trips of 24 |
+|---|---|---|---|
+| -30 % at t=1000 | 0.145 | 0.657 | 5 |
+| +50 % at t=1000 | 0.145 | 0.630 | 16 |
+| -30 % at t=700 | 0.093 | 0.672 | 8 |
+
+The guard restores the level, and its mean stays high by 0.01 to 0.05, with
+single days still far from clean (API_SPEC 3.3). It narrows the damage and does
+not remove it, and $m = 0.01$ was checked on two samples of one generator, so it
+is not a tuned setting. Clean outliers before fitting all the same. The guard is
+off by default, and the real-data report ran with it off.
+
+---
+
+## 15. The real-data result
+
+**What was run.** The pinned configuration, unchanged, on Kenneth French daily
+data from 1963-07-01 to 2026-09-30, 15918 days. The HMM observes the market total
+return and the books trade excess returns, at 5 bps, on the window $t \ge 504$.
+There were 245 refits, 1 not converged, none with a dead state, and the mean gate
+was 0.255 (`docs/REAL_DATA_EVALUATION.md`).
+
+| Book | Unfiltered | HMM gate | 21-day vol rule | Gate minus unfiltered | Gate minus vol rule |
+|---|---|---|---|---|---|
+| Market | 0.44 | 0.14 | 0.48 | -0.298 [-0.56, -0.03] | -0.333 [-0.56, -0.08] |
+| Industry momentum | 0.37 | 0.07 | 0.40 | -0.295 [-0.55, -0.06] | -0.324 [-0.54, -0.11] |
+
+Brackets are 95 % paired block bootstrap intervals, mean block 21, 2000 resamples.
+All four lie below zero. The gate also lost in each of the three periods
+reported, on both books, against the unfiltered book.
+
+**What it means.** A constant gate at the same mean exposure keeps the
+unfiltered Sharpe of 0.44, so the HMM gate lost 0.298 against simply holding less
+of the market. Its timing subtracted value on this history. A band of 0.3 helped
+and did not close the gap to the vol rule: -0.293 [-0.51, -0.06] on the market
+and -0.204 [-0.43, +0.01] on industry momentum, against the unbanded rule.
+
+**What it does not mean.** This is one market and one history. These are research
+portfolios, with early-sample costs far above 5 bps, and no financing or capacity
+model. There is no FX carry book, so the combined book has no real-data result.
+It tests this gate in this configuration, not every regime model.
+
+---
+
+## 16. Preregistration
+
+**The plain idea.** If you decide what counts as success after seeing the
+results, you can always find a way to succeed. So write the test down first.
+
+**Formally** (`docs/PREREGISTRATION.md`). The hypothesis: a regime gate beats the
+same-banded 21-day vol rule on Sharpe at 5 bps out of sample. To pass, one
+configuration is committed before the holdout is read, the paired bootstrap uses
+mean block 21 and at least 2000 resamples, the lower end of the 95 % interval is
+above zero, every registered book passes, and nothing is tuned afterwards. The
+result is published whatever it shows.
+
+**Worked example.** The 1963-2026 history has now been seen, so no part of it can
+serve as a holdout. A future test needs data after 2026-09-30, or a market no gate
+here has touched. Until one passes, the owner's rule applies: no new gate
+variants, no tuning and no claim that the gate adds value. This is why the
+Student-t, P(crisis) gate and real FX carry experiments were skipped. Each would
+have been another try on data that had already given its answer.
+
+The rule binds the rest of this guide. Sections 1 to 9 teach machinery that works
+as specified. The conclusion about using it to gate these strategies is in
+sections 10 to 15.
+
+---
+
+## 17. Honest limitations
 
 * **Detection lag.** A filtered probability can only react *after*
   crisis-scale returns arrive; the first few bad days are always taken at
@@ -648,29 +1000,26 @@ re-read the past under future parameters.
 * **Overfitting the meta-strategy.** K, refit frequency, gate mode,
   thresholds — each is a knob, and tuning knobs on the same history that
   evaluates them is in-sample selection in disguise. The bundled data are
-  *generated from* a 3-state model; real data will never reward the HMM
-  this cleanly (94.85% decoding accuracy is a best case, not an
-  expectation).
-* **Measured evidence.** `docs/GATE_EVALUATION.md` tests the gate against
-  constant-exposure and volatility baselines over simulated seeds. It does
-  not beat a 21-day volatility rule on average, and it loses to the
-  unfiltered book under fat tails. Treat figures in this guide as worked
-  examples, not evidence of an edge.
-* **No-trade band.** `gate_band` holds the gate until it moves by more than
-  the band, which cuts the daily turnover described below. It is off by
-  default: a band of 0.3 looked good on the bundled path, but it is a tuned
-  knob tested on one seed.
-* **Costs and capacity.** The filter trades every day (the gate wiggles);
-  in `"prob"` mode this is modest, but with expensive instruments the
-  extra turnover eats the benefit. Golden turnover values exist precisely
-  so ports can't quietly diverge on this.
+  *generated from* a 3-state model, so the 90.45% decoding accuracy is a best
+  case, not an expectation.
+* **Measured evidence.** The gate failed on real data (section 15). On simulated
+  seeds it does not beat a 21-day vol rule on average, and it loses to the
+  unfiltered book under fat tails (section 11.3). Treat bundled figures in this
+  guide as worked examples, not evidence of an edge.
+* **No-trade band.** `gate_band` cuts turnover (section 13.3). It is off by
+  default, because five bands tried on synthetic seeds are a selection, and on
+  real data the band did not close the gap.
+* **Costs and capacity.** The gate and the portfolio scale both trade every day.
+  Flat basis points ignore size, and the opt-in `regime.costs` model has
+  illustrative inputs, so no capacity claim is made. Golden turnover values exist
+  so ports cannot quietly diverge on this.
 * **Gaussian tails.** Within-state Gaussian emissions understate extreme
-  days even in the crisis state; Student-t emissions are the standard
-  upgrade.
+  days even in the crisis state (section 14). Student-t emissions are the
+  standard upgrade, and that experiment was skipped by the stop rule.
 
 ---
 
-## 11. Common pitfalls and numerical issues
+## 18. Common pitfalls and numerical issues
 
 * **Underflow in forward-backward** — the whole point of scaling; see
   Section 3.2. Never implement the textbook unscaled recursion for
@@ -713,7 +1062,7 @@ re-read the past under future parameters.
 
 ---
 
-## 12. Knowledge check Q&A
+## 19. Knowledge check Q&A
 
 **Q1. Why does the raw forward algorithm underflow, and what are the two
 standard fixes?**
@@ -752,7 +1101,7 @@ economic priors. Here both criteria pick K=3, which is the true DGP.
 **Q5. Expected duration of a regime with self-transition 0.98?**
 Geometric: $1/(1-0.98) = 50$ days. Persistence lives on the diagonal of
 $A$; the off-diagonal pattern tells you *where* a regime exits to (the
-fitted crisis here exits to choppy, essentially never straight to calm).
+fitted calm state here exits to choppy, essentially never straight to crisis).
 
 **Q6. Why does vol targeting tend to improve momentum's Sharpe?**
 It equalizes risk contributions across assets and time, so no single
@@ -772,7 +1121,9 @@ volatility/liquidity option; its arithmetic Sharpe hides negative skew.
 **Q8. Your regime filter improved Sharpe but lowered total return. Is it
 worth running?** (Sharpe here is the raw ratio; with a risk-free rate the
 comparison shifts slightly but the ordering does not.)
-Depends on the binding constraint. If capital is constrained and leverage
+First check that the improvement is real: restrict to the days the filter can
+affect, compare with a vol rule, and bootstrap the difference. If it survives,
+it depends on the binding constraint. If capital is constrained and leverage
 free, higher Sharpe can be re-levered to dominate outright. If leverage is
 capped, you are explicitly paying return for smaller drawdowns — often
 still rational (drawdowns trigger redemptions and forced deleveraging),
@@ -796,9 +1147,33 @@ mixture degeneracy), which is a spurious "optimum". The floor ($10^{-8}$)
 keeps every state's density proper, and it is what lets K exceed the
 data's distinct-value support without crashing.
 
+**Q11. A gate lifts full-sample Sharpe. Name the first check.**
+Remove the days it could not affect. A warm-up with the gate at 1 is shared by
+both books, and on the old seed 83 it turned a loss of 0.14 into an apparent gain
+(section 10).
+
+**Q12. Why must the bootstrap be paired and in blocks?**
+Paired, because the two books share crises and the question is about their
+difference. In blocks, because volatility clusters. Resampling days singly or
+books separately gives an interval that is too narrow (section 11.2).
+
+**Q13. A detector has crisis AUC 0.96. Why might it still lose money?**
+Profit depends on returns by state, lag, false alarms and turnover, not on the
+label. In the `vol_only` scenario AUC stays high and the gate loses, because
+regimes there carry no drift to avoid (section 12).
+
+**Q14. Why does a bootstrap interval on one path not replace a seed sweep?**
+The bootstrap resamples the path you have, so it cannot show that the path is
+unusual. Seed 19's gain has an interval and still sits at the 85th percentile of
+seeds (section 11.3).
+
+**Q15. The holdout failed by a small margin. Can you adjust the band and rerun?**
+No. A changed configuration is a new hypothesis and needs data nobody has seen
+(section 16).
+
 ---
 
-## 13. Further reading
+## 20. Further reading
 
 * **L. Rabiner (1989)**, "A Tutorial on Hidden Markov Models and Selected
   Applications in Speech Recognition," *Proc. IEEE* — the canonical HMM
@@ -825,6 +1200,8 @@ data's distinct-value support without crashing.
   forward premium puzzle.
 * **RiskMetrics Technical Document (1996)** — the $\lambda = 0.94$ EWMA
   volatility convention.
+* **D. Politis & J. Romano (1994)**, "The Stationary Bootstrap," *JASA* — the
+  resampling scheme of section 11.2.
 * **M. López de Prado (2018)**, *Advances in Financial Machine Learning* —
   backtest hygiene, lookahead and selection bias.
 

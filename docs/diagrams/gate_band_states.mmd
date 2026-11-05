@@ -1,0 +1,11 @@
+stateDiagram-v2
+    direction LR
+    [*] --> Holding: o starts at 1
+    Holding --> Holding: abs(g[t] - o[t-1]) <= band, keep o, no gate trade
+    Holding --> Moved: abs(g[t] - o[t-1]) > band (strict), o = g[t]
+    Moved --> Holding: next day, compare against the new o
+    note right of Holding
+        band = 0 gives o = g exactly.
+        The portfolio scale still moves daily,
+        so the book trades even while o holds.
+    end note

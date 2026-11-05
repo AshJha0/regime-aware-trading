@@ -97,6 +97,7 @@ PipelineConfig load_config(const std::string& path) {
     c.var_floor = json_number(text, "var_floor");
     c.momentum_lookback = json_int(text, "momentum_lookback");
     c.vol_target = json_number(text, "vol_target");
+    c.portfolio_vol_target = json_number(text, "portfolio_vol_target");
     c.ewma_lambda = json_number(text, "ewma_lambda");
     c.leverage_cap = json_number(text, "leverage_cap");
     c.carry_top_n = json_int(text, "carry_top_n");
@@ -180,6 +181,24 @@ Dataset load_dataset(const std::string& data_dir) {
     return ds;
 }
 
+ScaledBook scaled_book(const Dataset& ds, const PipelineConfig& cfg) {
+    const Matrix mom = momentum_positions(ds.trend_returns, cfg.momentum_lookback, cfg.vol_target,
+                                          cfg.ewma_lambda, cfg.leverage_cap);
+    const Matrix carry = carry_positions(ds.fx_rate_diffs, cfg.carry_top_n, cfg.carry_bottom_n,
+                                         cfg.rebalance_days);
+    Matrix carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs);
+    const BacktestResult raw_mom = run_backtest(mom, ds.trend_returns, cfg.cost_bps);
+    const BacktestResult raw_carry = run_backtest(carry, carry_rets, cfg.cost_bps);
+    std::vector<double> raw(raw_mom.net_returns.size());
+    for (std::size_t t = 0; t < raw.size(); ++t)
+        raw[t] = 0.5 * raw_mom.net_returns[t] + 0.5 * raw_carry.net_returns[t];
+    std::vector<double> scale = portfolio_scale(raw, cfg.portfolio_vol_target, cfg.ewma_lambda,
+                                                cfg.leverage_cap, cfg.momentum_lookback);
+    Matrix scaled_mom = apply_gate(mom, scale);
+    Matrix scaled_carry = apply_gate(carry, scale);
+    return {std::move(scaled_mom), std::move(scaled_carry), std::move(carry_rets), std::move(scale)};
+}
+
 CalmGuardValues calm_guard_values(const PipelineResult& pipe, double calm_guard,
                                   std::size_t inject_t, double inject_return) {
     const PipelineConfig& cfg = pipe.config;
@@ -203,11 +222,10 @@ GateBandValues gate_band_values(const PipelineResult& pipe, double band) {
     const Dataset& ds = pipe.dataset;
     const PipelineConfig& cfg = pipe.config;
     const std::vector<double> gate = apply_gate_band(pipe.gate, band);
-    const Matrix mom_pos = momentum_positions(ds.trend_returns, cfg.momentum_lookback,
-                                              cfg.vol_target, cfg.ewma_lambda, cfg.leverage_cap);
-    const Matrix carry_pos = carry_positions(ds.fx_rate_diffs, cfg.carry_top_n,
-                                             cfg.carry_bottom_n, cfg.rebalance_days);
-    const Matrix carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs);
+    const ScaledBook book = scaled_book(ds, cfg);
+    const Matrix& mom_pos = book.momentum;
+    const Matrix& carry_pos = book.carry;
+    const Matrix& carry_rets = book.carry_returns;
     const std::vector<std::string>* dates = &ds.dates;
     const BacktestResult mom =
         run_backtest(apply_gate(mom_pos, gate), ds.trend_returns, cfg.cost_bps, dates);
@@ -275,16 +293,16 @@ PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int>
 
     const double cost = cfg.cost_bps;
 
-    Matrix mom_pos = momentum_positions(ds.trend_returns, cfg.momentum_lookback, cfg.vol_target,
-                                        cfg.ewma_lambda, cfg.leverage_cap);
-    Matrix carry_pos = carry_positions(ds.fx_rate_diffs, cfg.carry_top_n, cfg.carry_bottom_n,
-                                       cfg.rebalance_days);
-    Matrix carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs);
+    ScaledBook book = scaled_book(ds, cfg);
+    const Matrix& mom_pos = book.momentum;
+    const Matrix& carry_pos = book.carry;
+    const Matrix& carry_rets = book.carry_returns;
 
     PipelineResult pipe{
         std::move(ds), cfg, std::move(hmm2), std::move(hmm3), fit2, fit3,
         std::move(viterbi3), std::move(smoothed3), std::move(stationary3),
-        viterbi_accuracy, std::move(gate_res.gate), std::move(gate_res.guard_trips), {}, {}, {}};
+        viterbi_accuracy, crisis_label, std::move(gate_res.gate), std::move(gate_res.guard_trips),
+        std::move(book.scale), {}, {}, {}};
 
     const std::vector<std::string>* dates = &pipe.dataset.dates;
     pipe.results["momentum_unfiltered"] = run_backtest(mom_pos, pipe.dataset.trend_returns, cost, dates);
@@ -307,7 +325,7 @@ PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int>
     }
 
     // Crisis table: attribute daily strategy returns to the full-sample
-    // K=3 Viterbi state (state 0 = crisis on this data); the table has K3
+    // K=3 Viterbi state (crisis_label = highest variance); the table has K3
     // rows regardless of the gate's n_states.
     for (const auto& [name, res] : pipe.results)
         pipe.crisis[name] = state_conditional_returns(res.net_returns, pipe.viterbi3, K3);

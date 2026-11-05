@@ -425,3 +425,87 @@ def test_regime_gate_warns_when_the_guard_trips():
     r[1000] = -0.3
     with pytest.warns(RuntimeWarning, match="calm-state guard tripped"):
         regime_gate(r, cfg["n_states"], cfg["train_min_days"], cfg["refit_days"], calm_guard=0.01)
+
+
+def test_portfolio_scale_formula_warm_up_and_cap():
+    from regime import portfolio_scale
+    from regime.strategies import PORTFOLIO_VOL_INIT_DAYS
+
+    net = 0.002 + 0.0005 * (np.arange(60) % 3)
+    scale = portfolio_scale(net, 0.10, 0.94, 4.0, 5)
+    seed_day = 5 + PORTFOLIO_VOL_INIT_DAYS - 1
+    assert np.all(scale[:seed_day] == 1.0)
+    sig2 = np.mean(net[5:seed_day + 1] ** 2)
+    assert scale[seed_day] == pytest.approx(min(0.10 / np.sqrt(252 * sig2), 4.0), abs=1e-12)
+    sig2 = 0.94 * sig2 + 0.06 * net[seed_day + 1] ** 2
+    assert scale[seed_day + 1] == pytest.approx(min(0.10 / np.sqrt(252 * sig2), 4.0), abs=1e-12)
+    assert portfolio_scale(np.zeros(40), 0.10, 0.94, 4.0, 0)[39] == 4.0
+    assert np.all(portfolio_scale(net[:10], 0.10, 0.94, 4.0, 5) == 1.0)
+    for bad in ((0.0, 0.94, 4.0), (0.10, 1.0, 4.0), (0.10, 0.94, 0.0)):
+        with pytest.raises(ValueError):
+            portfolio_scale(net, *bad, 5)
+
+
+def test_portfolio_scale_ignores_the_future(data_dir):
+    """Perturb every input after day k: the book through day k must not move."""
+    from dataclasses import replace
+
+    from regime import load_dataset, scaled_book
+
+    ds = load_dataset(data_dir)
+    k = 1200
+    trend, spot, diffs = ds.trend_returns.copy(), ds.fx_spot_returns.copy(), ds.fx_rate_diffs.copy()
+    trend[k + 1:] = -3.0 * trend[k + 1:] + 0.001
+    spot[k + 1:] = -3.0 * spot[k + 1:]
+    diffs[k + 1:] = diffs[k + 1:][:, ::-1]
+    changed = replace(ds, trend_returns=trend, fx_spot_returns=spot, fx_rate_diffs=diffs)
+    base, other = scaled_book(ds, ds.config), scaled_book(changed, ds.config)
+    # 1e-13, not exact: the copies differ in memory layout from the loaded
+    # frames, so numpy sums in another order (measured gap 4e-16).
+    for key in ("scale", "momentum", "carry"):
+        np.testing.assert_allclose(base[key][:k + 1], other[key][:k + 1], rtol=0.0, atol=1e-13)
+    assert abs(base["scale"][k + 1] - other["scale"][k + 1]) > 1e-3
+
+
+def test_gate_multiplies_the_scaled_book_and_scale_ignores_the_gate(pipeline_full):
+    """The gate's de-risking is kept: filtered P = gate * scale * raw P."""
+    from regime import apply_gate, momentum_positions, scaled_book
+
+    ds, cfg = pipeline_full["dataset"], pipeline_full["config"]
+    book = scaled_book(ds, cfg)
+    assert np.array_equal(book["scale"], pipeline_full["portfolio_scale"])
+    raw = momentum_positions(
+        ds.trend_returns,
+        lookback=cfg["momentum_lookback"],
+        vol_target=cfg["vol_target"],
+        ewma_lambda=cfg["ewma_lambda"],
+        leverage_cap=cfg["leverage_cap"],
+    )
+    gate = pipeline_full["gate"]
+    filtered = apply_gate(book["momentum"], gate)
+    assert np.allclose(filtered, raw * (gate * book["scale"])[:, None], atol=1e-15)
+    start = cfg["train_min_days"]
+    assert (
+        pipeline_full["combined"]["filtered"]["net_returns"][start:].std()
+        < pipeline_full["combined"]["unfiltered"]["net_returns"][start:].std()
+    )
+
+
+def test_book_runs_near_the_portfolio_target(pipeline_full):
+    start = pipeline_full["config"]["train_min_days"]
+    net = pipeline_full["combined"]["unfiltered"]["net_returns"][start:]
+    assert 0.07 < np.sqrt(252) * net.std() < 0.13
+
+
+def test_seed_rule_reproduces_the_bundled_seed():
+    """API_SPEC 4: the pinned rule picks the seed the data was built from."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "data" / "generate_data.py"
+    spec = importlib.util.spec_from_file_location("generate_data_rule", path)
+    gd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gd)
+    seed, median = gd.select_seed()
+    assert seed == gd.SEED == 19
+    assert median == pytest.approx(0.5330, abs=5e-5)

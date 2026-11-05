@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>regime-aware-trading — Gaussian HMM regime gating of momentum and FX carry in four languages</title>
+<title>regime-aware-trading — a case study in evaluating a regime signal, in four languages</title>
 <!-- GitHub Pages landing page. If the repository is renamed, update the
      github.com/AshJha0/regime-aware-trading links below to match. -->
 <style>
@@ -38,9 +38,10 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 <header>
   <div class="wrap">
     <h1>regime-aware-trading</h1>
-    <p>A four-language reference implementation (Python reference, C++, Rust, Java) of a regime-aware trading study: a diagonal-covariance Gaussian hidden Markov model — scaled forward-backward, deterministic Baum-Welch EM, Viterbi decoding, AIC/BIC model selection — fitted walk-forward on a market index and used to gate time-series momentum and an FX carry basket through a shared no-lookahead backtest engine. Initialisation, convergence semantics, the dead-state guard, label ordering, rebalance schedules, accounting and validation are all pinned in API_SPEC.md, no library code uses an RNG, and all four ports reproduce 22 golden cases (83 scalars) to 1e-6..1e-8.</p>
+    <p><strong>On real US equity data from 1963 to 2026 the HMM regime gate lost</strong> to the unfiltered book and to a 21-day volatility rule, with bootstrap intervals below zero, so tuning has stopped. What remains is a case study in evaluating a regime signal: a four-language reference implementation (Python reference, C++, Rust, Java) of a diagonal-covariance Gaussian hidden Markov model gating time-series momentum and an FX carry basket through a shared no-lookahead backtest engine, with the conventions pinned in API_SPEC.md and all four ports reproducing 23 golden cases (87 scalars) to 1e-6..1e-8.</p>
     <nav>
-      <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LEARN.md">Learn (guide)</a>
+      <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/REAL_DATA_EVALUATION.md">Real-data result</a>
+      <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/LEARN.md">Learn (guide)</a>
       <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/COOKBOOK.md">Cookbook</a>
       <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/ARCHITECTURE.md">Architecture</a>
       <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/API_SPEC.md">API contract</a>
@@ -54,18 +55,19 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 <div class="wrap">
   <h2>Measured, not claimed</h2>
   <div class="numbers"><table>
-    <tr><td>Cross-language parity</td><td>python 118 · cpp 90 · rust 91 · java 90 tests, run by CI on every pull request, plus 60 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
-    <tr><td>Golden suite</td><td>22 named cases / 83 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
+    <tr><td>Real-data result</td><td><strong>The gate failed.</strong> Kenneth French daily data, 1963-07-01 to 2026-09-30, 5 bp. Market: Sharpe 0.14 gated, 0.44 unfiltered, 0.48 for a 21-day vol rule; gate minus vol rule −0.333, 95 % interval [−0.56, −0.08]. Industry momentum: 0.07, 0.37, 0.40; −0.324 [−0.54, −0.11]. <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/REAL_DATA_EVALUATION.md">Report</a> · <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/PREREGISTRATION.md">Stop rule</a></td></tr>
+    <tr><td>Cross-language parity</td><td>python 150 · cpp 92 · rust 93 · java 92 tests, run by CI on every pull request, plus 75 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
+    <tr><td>Golden suite</td><td>23 named cases / 87 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
     <tr><td>Ground truth</td><td>forward likelihood, smoothed marginals and the Viterbi path checked against brute-force sums over all 8 paths of a K = 2, T = 3 model (1e-12); EM monotone on the bundled index; transition rows sum to 1 (1e-12); <code>pi P = pi</code> (1e-10)</td></tr>
-    <tr><td>Determinism</td><td>no RNG in library code (only the seeded generator, numpy <code>default_rng(83)</code>); pinned Hyndman-Fan-7 quantile initialisation, iteration order and tie-breaks; two fits are bitwise identical; any cross-language drift is a bug, not noise</td></tr>
+    <tr><td>Determinism</td><td>no RNG in library code (only the seeded generator, numpy <code>default_rng(19)</code>); pinned Hyndman-Fan-7 quantile initialisation, iteration order and tie-breaks; two fits are bitwise identical; any cross-language drift is a bug, not noise</td></tr>
     <tr><td>No lookahead</td><td>P[t] decided at the close of day t from data through t, earns r[t+1]; the walk-forward gate uses filtered (causal) probabilities under a model fitted on r[0..t], refit every 63 days on an expanding window; a one-day-shift test enforces it</td></tr>
     <tr><td>Pinned guards</td><td>dead-state guard: transition-row support &lt; 1e-12 stops EM before the M-step with finite parameters and <code>dead_state = i</code> · <code>converged</code>/<code>monotone</code> flags · wipe-out (<code>net[t] ≤ −1</code>) and returns ≤ −1 are errors · strictly increasing dates</td></tr>
-    <tr><td>Headline result</td><td><strong>No demonstrated edge.</strong> The full-sample Sharpe lift (1.80 → 1.87) comes from 503 warm-up days with the gate at 1. On the 1496 days it can affect, at 5 bp: 1.49 unfiltered, 1.35 gated, difference −0.14, 95 % interval [−0.85, 0.58]. Over 100 simulated seeds the gate beats unfiltered on 71 % of paths but a 21-day volatility rule on only 50 %; with volatility-only regimes it beats unfiltered on 24 %, and with Student-t(4) shocks on 17 %. Synthetic data throughout. <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/GATE_EVALUATION.md">Full report</a></td></tr>
-    <tr><td>Detection</td><td>out-of-sample accuracy 91.0 % against a 63.4 % majority class, AUC 0.96, 0 of 7 crises missed on the bundled path; the 94.85 % Viterbi accuracy is in-sample and a best case</td></tr>
-    <tr><td>Strategy config</td><td>momentum: 252-day signal, EWMA vol target (λ = 0.94), 4× leverage cap · carry: rank differentials, top/bottom 3 of 6, 21-day rebalance · costs 5 bp one-way on turnover · 252-day annualisation, raw Sharpe</td></tr>
+    <tr><td>Synthetic result</td><td><strong>Seed 19 flatters the gate.</strong> After warm-up, at 5 bp: 0.54 unfiltered, 0.99 gated, difference +0.456, 95 % interval [−0.13, 1.05], at the 85th percentile of 100 seeds. Over those seeds the gate beats unfiltered on 66 % of paths and a 21-day vol rule on 49 %; with volatility-only regimes it beats unfiltered on 19 %, and with Student-t(4) shocks on 12 %. <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/docs/GATE_EVALUATION.md">Full report</a></td></tr>
+    <tr><td>Detection</td><td>on the bundled path, also favourable: out-of-sample accuracy 88.4 % against a 67.5 % majority class, crisis AUC 0.962, 0 of 13 crises missed; the 90.45 % Viterbi accuracy is in-sample and a best case. Detecting a regime did not produce profit</td></tr>
+    <tr><td>Strategy config</td><td>momentum: 252-day signal, EWMA vol target (λ = 0.94), 4× leverage cap · 10 % portfolio vol target, whose daily scale adds real turnover · carry: rank differentials, top/bottom 3 of 6, 21-day rebalance · costs 5 bp one-way on turnover · 252-day annualisation, raw Sharpe</td></tr>
   </table></div>
 
-  <div class="honest"><strong>What the latest review found.</strong> The code is careful: no lookahead was found, EM converged on all 24 refits, and 40 random starts found nothing better. The research claim did not survive: the gate adds no edge over a free volatility rule, its daily moves lift carry turnover from 0.25 to 18.4 a year, and its break-even cost on the bundled path is 2.8 bp. The bundled seed is also unrepresentative, with a 1.49 unfiltered Sharpe against a 0.35 average across seeds. One weakness stays in the default configuration: a single extreme print can capture the calm state and halve the gate; the opt-in <code>calm_guard</code> detects this and keeps the mean gate within 0.04 of clean. The review added the evaluation harness, CI for all four languages, a streaming <code>RegimeFilter</code>, and opt-in <code>gate_band</code> and <code>transition_floor</code>. This is a daily model with no market-data or order path, so it is not a low-latency system.</div>
+  <div class="honest"><strong>Where the project stands.</strong> The code is careful: the one-day-shift test finds no lookahead, the four ports agree on every golden scalar, and all 24 refits on the bundled path converged. The research claim did not survive. The gate lost on real data, so by the rule in the preregistration there will be no new gate variants, no further tuning and no claim that it adds value; Student-t emissions, a P(crisis) gate and real FX carry were skipped for that reason. On the bundled path the gate doubles turnover, from 36.8 to 73.9 a year after warm-up, and its advantage is gone at 11.54 bp. One weakness stays in the default configuration: a single extreme print can capture the calm state and cut the mean gate from 0.624 to 0.145; the opt-in <code>calm_guard</code> brings it back to 0.657. This is a daily model with no market-data or order path, so it is not a low-latency system.</div>
 
   <h2>What's inside</h2>
   <div class="grid">
@@ -74,13 +76,15 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <div class="card"><h3>Baum-Welch EM, pinned</h3>
       <p>Deterministic, RNG-free: quantile initialisation (Hyndman-Fan definition 7), Bilmes' Gaussian M-step with the <code>t ≤ T−1</code> transition denominator, a variance floor, states relabelled by ascending mean, a dead-state guard and <code>converged</code> / <code>dead_state</code> / <code>monotone</code> flags on the fit result. Non-convergence at <code>max_iter</code> is reported, not thrown; the returned parameters are always finite.</p></div>
     <div class="card"><h3>Strategies</h3>
-      <p><code>strategies.py</code>: time-series momentum (Moskowitz-Ooi-Pedersen) with a 252-day signal, RiskMetrics EWMA vol targeting and a 4× leverage cap; an FX carry basket (Lustig-Roussanov-Verdelhan style) long the top-3 and short the bottom-3 rate differentials, rebalanced every 21 days with index tie-break; and the walk-forward regime gate that scales positions by the filtered P(calm) — the calm state re-identified by lowest variance at every refit — with warm-started refits every 63 days.</p></div>
+      <p><code>strategies.py</code>: time-series momentum (Moskowitz-Ooi-Pedersen) with a 252-day signal, RiskMetrics EWMA vol targeting and a 4× leverage cap; an FX carry basket (Lustig-Roussanov-Verdelhan style) long the top-3 and short the bottom-3 rate differentials, rebalanced every 21 days with index tie-break; a 10 % portfolio vol target; and the walk-forward regime gate that scales positions by the filtered P(calm), with the calm state re-identified by lowest variance at every refit and warm-started refits every 63 days. Opt-in <code>gate_band</code>, <code>transition_floor</code> and <code>calm_guard</code>.</p></div>
     <div class="card"><h3>Backtest engine</h3>
       <p><code>backtest.py</code>: pinned accounting with positions decided at the close and earning the next day's return, one-way costs in basis points of notional turnover charged on the trade date, and seven metrics — annualised return and vol, raw Sharpe, max drawdown, Calmar, hit rate, worst month — plus a crisis-state attribution table keyed to the fitted K = 3 model. A wipe-out (<code>net[t] ≤ −1</code>) names the day and raises.</p></div>
     <div class="card"><h3>Data &amp; pipeline</h3>
       <p><code>data/</code> holds 2000 trading days generated from a true 3-state regime model (calm-bull / choppy / crisis): the market index, 6 futures-like trend assets, 6 synthetic currencies with spot returns and rate differentials, the generator's true state path for teaching comparison, and a pinned <code>config.json</code>. <code>pipeline.py</code> runs model selection, the fit, the six strategy variants and attribution end to end; <code>generate_data.py</code> rewrites CSVs and goldens byte-for-byte reproducibly.</p></div>
     <div class="card"><h3>Golden suite &amp; testing</h3>
-      <p>Five mirrored layers per language: ground truth by enumeration, mathematical properties (monotone EM, stochastic rows, stationarity, chained <code>forward_step</code> equals the full pass, costs never help, the accounting identity, the no-lookahead shift), the 22-case / 77-scalar golden file with baked-in sign and semantic invariants (crisis momentum return &lt; 0, filtered combined Sharpe higher and drawdown shallower, re-rank panel flips at day 21), edge cases, and robustness (dead state, zero-likelihood data, malformed warm starts). C++ parses the JSON with a hand-rolled reader, Rust with serde_json, Java with a bundled parser.</p></div>
+      <p>Five mirrored layers per language: ground truth by enumeration, mathematical properties (monotone EM, stochastic rows, stationarity, chained <code>forward_step</code> equals the full pass, costs never help, the accounting identity, the no-lookahead shift), the 23-case / 87-scalar golden file with semantic invariants (filtered combined drawdown shallower, re-rank panel flips at day 21), edge cases, and robustness (dead state, zero-likelihood data, malformed warm starts). C++ parses the JSON with a hand-rolled reader, Rust with serde_json, Java with a bundled parser.</p></div>
+    <div class="card"><h3>Evaluation</h3>
+      <p><code>evaluation.py</code> and four generated reports: baselines, a paired stationary block bootstrap, cost and lag sweeps, break-even cost and seed sweeps on synthetic data; a no-trade band study; the real-data test; and a capacity curve from <code>costs.py</code>, whose spreads and volumes are illustrative, not calibrated. Python only: the ports carry the model, not the research code.</p></div>
     <div class="card"><h3>Validation &amp; error contract</h3>
       <p>Same rules and error family everywhere — <code>ValueError</code>, <code>std::invalid_argument</code>, <code>Err(RegimeError::InvalidInput)</code>, <code>IllegalArgumentException</code>: empty inputs, NaN/inf, K/D and positions/returns/dates shape mismatches, non-stochastic parameters, returns ≤ −1, negative costs, <code>K &lt; 2</code>, <code>T ≤ K</code>, thresholds outside [0, 1], labels outside [0, K), duplicated or unsorted dates. Rust never panics on library input; Java never throws <code>ArrayIndexOutOfBoundsException</code> from a public method.</p></div>
     <div class="card"><h3>Units, timing, scope</h3>
@@ -88,7 +92,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <div class="card"><h3>References</h3>
       <p>Baum, Petrie, Soules &amp; Weiss (1970); Rabiner (1989) for scaling, re-estimation and the zero-mass discussion behind the dead-state guard; Bilmes (1998); Viterbi (1967); Hamilton (1989) for filtered regime probabilities; Akaike (1974); Schwarz (1978); Hyndman &amp; Fan (1996); Moskowitz, Ooi &amp; Pedersen (2012); Hurst, Ooi &amp; Pedersen (2017); RiskMetrics (1996); Fama (1984); Brunnermeier, Nagel &amp; Pedersen (2008); Lustig, Roussanov &amp; Verdelhan (2011); Sharpe (1994); Bishop, Hamilton (1994), Ang &amp; Bekaert and López de Prado as background.</p></div>
     <div class="card"><h3>Guide &amp; cookbook</h3>
-      <p>LEARN.md builds HMMs from first principles through scaling, Baum-Welch, Viterbi and model selection, then momentum, carry, regime filtering and the danger of lookahead, honest limitations, numerical pitfalls and a knowledge check Q&amp;A. COOKBOOK.md's 60 snippets in all four languages are compiled and run against the built libraries by <code>tools/check_cookbook.py</code>.</p></div>
+      <p>LEARN.md builds HMMs from first principles through scaling, Baum-Welch, Viterbi and model selection, then momentum, carry and lookahead, and then how to judge a signal: why full-sample results mislead, baselines, the paired block bootstrap, seed sweeps, turnover, fat tails, the real-data result and preregistration. COOKBOOK.md's 75 snippets are compiled and run against the built libraries by <code>tools/check_cookbook.py</code>.</p></div>
   </div>
 
   <h2>Part of a wider portfolio</h2>
@@ -116,34 +120,34 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 # Python reference (3.11, numpy &gt;= 1.24, pandas &gt;= 2.0, pytest)
 cd python
 PYTHONPATH=src python3 demo.py          # end-to-end demo
-PYTHONPATH=src python3 -m pytest -q     # test suite (118 tests)
+PYTHONPATH=src python3 -m pytest -q     # test suite (150 tests)
 cd ..
 
 # C++ (C++17, CMake &gt;= 3.20, GoogleTest)
 cd cpp
 bash build.sh                           # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j2
 ./build/demo                            # demo
-ctest --test-dir build --output-on-failure   # tests (GoogleTest, 90 tests in one binary)
+ctest --test-dir build --output-on-failure   # tests (GoogleTest, 92 tests in one binary)
 cd ..
 
 # Rust (edition 2021)
 cd rust
 cargo build --release                   # zero warnings
 cargo run --release --bin demo          # demo
-cargo test --release                    # 91 integration tests
+cargo test --release                    # 93 integration tests
 cd ..
 
 # Java (21, JUnit 4 + Hamcrest — no Maven/Gradle)
 cd java
 bash build.sh                           # javac -Xlint:all -Werror into out/
 bash demo.sh                            # demo main
-bash test.sh                            # JUnitCore on all *Test classes (90 tests)
+bash test.sh                            # JUnitCore on all *Test classes (92 tests)
 cd ..
 
-# cookbook snippets, after the three native builds (60 snippets)
+# cookbook snippets, after the three native builds (75 snippets)
 python3 tools/check_cookbook.py</pre>
 
-  <footer>regime-aware-trading — four golden-pinned ports of an HMM regime gate over momentum and carry, with the lookahead rules and limitations stated up front. See the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/README.md">README</a> and the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LICENSE">MIT license</a>.</footer>
+  <footer>regime-aware-trading — four golden-pinned ports of an HMM regime gate that failed on real data, kept as a case study in evaluating a signal. See the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/README.md">README</a> and the <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LICENSE">MIT license</a>.</footer>
 </div>
 </body>
 </html>

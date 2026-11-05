@@ -26,4 +26,6 @@ This folder contains a self-contained landing page (`index.html`) for
 The numbers block on the landing page ("Measured, not claimed") quotes the
 test counts and golden-case counts stated in `README.md`. When those change,
 update both places in the same commit — the page is static HTML and has no
-build step.
+build step. `tools/check_docs.py` fails CI if the two disagree. The evaluation
+figures on the page come from the generated reports in this folder, so check
+them whenever a report is regenerated.

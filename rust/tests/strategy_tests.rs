@@ -6,7 +6,7 @@ use rand_distr::{Distribution, Normal};
 
 use regime::{
     apply_gate, carry_positions, carry_total_returns, ewma_variance, momentum_positions,
-    regime_gate, Matrix,
+    regime_gate, Matrix, portfolio_scale, PORTFOLIO_VOL_INIT_DAYS,
 };
 
 fn constant_matrix(t: usize, values: &[f64]) -> Matrix {
@@ -402,4 +402,34 @@ fn calm_guard_range_is_checked() {
         let err = regime::regime_gate_report(&[0.0; 10], 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, options);
         assert!(err.unwrap_err().to_string().contains("calm_guard"));
     }
+}
+
+#[test]
+fn portfolio_scale_formula_warm_up_and_cap() {
+    let net: Vec<f64> = (0..60).map(|t| 0.002 + 0.0005 * (t % 3) as f64).collect();
+    let scale = portfolio_scale(&net, 0.10, 0.94, 4.0, 5).unwrap();
+    let seed_day = 5 + PORTFOLIO_VOL_INIT_DAYS - 1;
+    assert!(scale[..seed_day].iter().all(|&s| s == 1.0));
+    let mut sig2 = net[5..=seed_day].iter().map(|x| x * x).sum::<f64>() / 21.0;
+    assert!((scale[seed_day] - (0.10 / (252.0 * sig2).sqrt()).min(4.0)).abs() < 1e-12);
+    sig2 = 0.94 * sig2 + 0.06 * net[seed_day + 1] * net[seed_day + 1];
+    assert!((scale[seed_day + 1] - (0.10 / (252.0 * sig2).sqrt()).min(4.0)).abs() < 1e-12);
+    assert!(portfolio_scale(&vec![0.0; 40], 0.10, 0.94, 4.0, 0).unwrap()[39] == 4.0);
+    assert!(portfolio_scale(&net[..10], 0.10, 0.94, 4.0, 5).unwrap().iter().all(|&s| s == 1.0));
+    assert!(portfolio_scale(&net, 0.0, 0.94, 4.0, 5).is_err());
+    assert!(portfolio_scale(&net, 0.10, 1.0, 4.0, 5).is_err());
+    assert!(portfolio_scale(&net, 0.10, 0.94, 0.0, 5).is_err());
+}
+
+#[test]
+fn portfolio_scale_ignores_the_future() {
+    let net: Vec<f64> = (0..200).map(|t| 0.003 * ((t * 7 % 11) as f64 - 5.0) / 5.0).collect();
+    let base = portfolio_scale(&net, 0.10, 0.94, 4.0, 20).unwrap();
+    let mut changed = net.clone();
+    for v in &mut changed[101..] {
+        *v = -3.0 * *v + 0.01;
+    }
+    let other = portfolio_scale(&changed, 0.10, 0.94, 4.0, 20).unwrap();
+    assert_eq!(base[..=100], other[..=100]);
+    assert_ne!(base[101], other[101]);
 }

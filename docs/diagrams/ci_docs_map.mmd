@@ -1,0 +1,23 @@
+flowchart LR
+    PR["Pull request or push to main"] --> GUARD
+    PR --> PY
+    PR --> CPP
+    PR --> SAN
+    PR --> RS
+    PR --> JV
+    PR --> CB
+    subgraph GUARD["guard job"]
+        WORD["banned-word grep"]
+        DOCS["tools/check_docs.py"]
+    end
+    PY["python 3.11<br/>pytest, any skip fails"]
+    CPP["c++ release<br/>ctest"]
+    SAN["c++ asan + ubsan<br/>ctest"]
+    RS["rust<br/>cargo test, clippy -D warnings"]
+    JV["java 21<br/>JUnit 4"]
+    CB["cookbook job<br/>tools/check_cookbook.py"]
+    GOLD["data/golden/golden.json"] --> PY & CPP & SAN & RS & JV
+    GOLD --> DOCS
+    DOCS --> READ["README, LEARN, COOKBOOK, API_SPEC,<br/>ARCHITECTURE, site, diagrams"]
+    CB --> COOK["COOKBOOK.md snippets"]
+    MANUAL["Run by hand, not in CI:<br/>evaluate_gate, evaluate_band,<br/>evaluate_real_data, evaluate_capacity"] --> REPORTS["docs/*_EVALUATION.md"]

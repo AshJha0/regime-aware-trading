@@ -1,6 +1,6 @@
 flowchart TD
     subgraph DATA["data/ (seeded generator, RNG only here)"]
-        GEN[generate_data.py<br/>default_rng 83, true 3-state DGP]
+        GEN[generate_data.py<br/>default_rng 19, true 3-state DGP]
         IDX[market_index.csv]
         TRD[trend_assets.csv]
         FX[fx_carry.csv<br/>spot_ret + rate_diff]
@@ -18,12 +18,12 @@ flowchart TD
     FX --> CAR["carry_positions<br/>rank diffs, top3/bottom3, 21d rebalance"]
     FX --> CRET["carry_total_returns<br/>spot + diff(t-1)/252"]
 
+    MOM --> SCALE["portfolio_scale<br/>one 10% vol scale from the unfiltered book"]
+    CAR --> SCALE
+    SCALE --> APG
     GATE --> APG["apply_gate: P_filt = gate * P<br/>(optional gate_band no-trade band)"]
-    MOM --> APG
-    CAR --> APG
 
-    MOM --> BT["run_backtest<br/>gross = P(t-1)*r(t), costs on turnover,<br/>equity, metrics"]
-    CAR --> BT
+    SCALE --> BT["run_backtest<br/>gross = P(t-1)*r(t), costs on turnover,<br/>equity, metrics"]
     CRET --> BT
     APG --> BT
 
@@ -32,7 +32,7 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>22 cross-language cases, 83 scalars"]
+    BT --> OUT["demo report / golden.json<br/>23 cross-language cases, 87 scalars"]
     COMB --> OUT
     CRISIS --> OUT
-    OUT --> EVAL["tools/evaluate_gate.py<br/>baselines, bootstrap, seed sweep<br/>docs/GATE_EVALUATION.md"]
+    OUT --> EVAL["tools/evaluate_*.py<br/>baselines, bootstrap, seed sweep, real data, capacity<br/>docs/*_EVALUATION.md"]

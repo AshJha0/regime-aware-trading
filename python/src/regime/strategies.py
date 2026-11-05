@@ -26,6 +26,9 @@ TRADING_DAYS = 252
 #: (1.4826 * MAD).  Pinned, API_SPEC 3.3.
 CALM_CLIP_MADS = 8.0
 
+#: Returns seeding the portfolio vol estimate.  Pinned, API_SPEC 3.5.
+PORTFOLIO_VOL_INIT_DAYS = 21
+
 
 def _validate_returns(returns: np.ndarray, name: str = "returns", simple_returns: bool = False) -> np.ndarray:
     """Coerce to (T, A) float array; reject empty or non-finite input.
@@ -135,6 +138,59 @@ def momentum_positions(
     valid = slice(lookback - 1, T)
     pos[valid] = signal[valid] * lev[valid] / A
     return pos
+
+
+def portfolio_scale(
+    net: np.ndarray,
+    target: float,
+    ewma_lambda: float,
+    leverage_cap: float,
+    first_day: int,
+) -> np.ndarray:
+    """Portfolio-level vol scale of a book (API_SPEC 3.5).
+
+    ``net`` is the realised net return of the unscaled, ungated book.  The
+    scale is 1 until ``PORTFOLIO_VOL_INIT_DAYS`` returns from ``first_day`` on
+    are in.  Then ``scale[t] = min(target / ann_vol[t], leverage_cap)`` with a
+    zero-mean EWMA variance seeded by the mean square of those returns, and
+    ``leverage_cap`` if ``ann_vol[t] == 0``.  ``scale[t]`` reads ``net[..t]``
+    only and multiplies ``P[t]``, so it earns the day t+1 return.
+
+    Args:
+        net: Daily net returns of the unscaled book, shape ``(T,)``.
+        target: Annualized portfolio vol target, ``> 0``.
+        ewma_lambda: EWMA decay, in ``(0, 1)``.
+        leverage_cap: Largest scale, ``> 0``.
+        first_day: First day the whole book earns a return, ``>= 0``.
+
+    Returns:
+        Scale per day, shape ``(T,)``.  All ones if the sample is too short.
+
+    Raises:
+        ValueError: On a non-finite or non-1-D ``net`` or a bad setting.
+    """
+    u = np.asarray(net, dtype=float)
+    if u.ndim != 1 or not np.all(np.isfinite(u)):
+        raise ValueError("portfolio_scale: net must be a finite 1-D series")
+    if not (np.isfinite(target) and target > 0.0):
+        raise ValueError(f"portfolio_vol_target must be > 0, got {target}")
+    if not 0.0 < ewma_lambda < 1.0:
+        raise ValueError(f"ewma lambda must be in (0, 1), got {ewma_lambda}")
+    if not (np.isfinite(leverage_cap) and leverage_cap > 0.0):
+        raise ValueError(f"leverage_cap must be > 0, got {leverage_cap}")
+    if first_day < 0:
+        raise ValueError(f"first_day must be >= 0, got {first_day}")
+    scale = np.ones(u.size)
+    seed_day = first_day + PORTFOLIO_VOL_INIT_DAYS - 1
+    if seed_day >= u.size:
+        return scale
+    sig2 = float(np.mean(u[first_day:seed_day + 1] ** 2))
+    for t in range(seed_day, u.size):
+        if t > seed_day:
+            sig2 = ewma_lambda * sig2 + (1.0 - ewma_lambda) * u[t] ** 2
+        ann_vol = np.sqrt(TRADING_DAYS * sig2)
+        scale[t] = min(target / ann_vol, leverage_cap) if ann_vol > 0.0 else leverage_cap
+    return scale
 
 
 def carry_positions(

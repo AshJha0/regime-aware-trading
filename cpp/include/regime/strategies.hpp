@@ -64,6 +64,19 @@ struct RegimeGateResult {
 /// (1.4826 * MAD).  Pinned, API_SPEC 3.3.
 inline constexpr double kCalmClipMads = 8.0;
 
+/// Returns seeding the portfolio vol estimate.  Pinned, API_SPEC 3.5.
+inline constexpr int kPortfolioVolInitDays = 21;
+
+/// Portfolio-level vol scale of a book (API_SPEC 3.5).  \p net is the realised
+/// net return of the unscaled, ungated book.  The scale is 1 until
+/// kPortfolioVolInitDays returns from \p first_day on are in, then
+/// min(target / ann_vol, leverage_cap) on a zero-mean EWMA variance seeded by
+/// their mean square (leverage_cap if ann_vol == 0).  scale[t] reads net[..t]
+/// only.  All ones if the sample is too short.
+/// \throws std::invalid_argument on non-finite net or a bad setting.
+std::vector<double> portfolio_scale(const std::vector<double>& net, double target,
+                                    double ewma_lambda, double leverage_cap, int first_day);
+
 /// Clip x to median +/- width * 1.4826 * MAD (API_SPEC 3.3).  A zero MAD gives
 /// no usable scale, so x is returned unchanged.
 std::vector<double> winsorize_mad(const std::vector<double>& x, double width = kCalmClipMads);

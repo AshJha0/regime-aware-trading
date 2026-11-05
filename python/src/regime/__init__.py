@@ -12,6 +12,13 @@ from .backtest import (
     run_backtest,
     state_conditional_returns,
 )
+from .costs import (
+    CostAssumptions,
+    aum_at_sharpe_fraction,
+    daily_cost_fraction,
+    participation,
+    trade_cost,
+)
 from .evaluation import (
     BootstrapResult,
     BreakEven,
@@ -61,6 +68,7 @@ from .pipeline import (
     golden_cases,
     load_dataset,
     run_full_pipeline,
+    scaled_book,
 )
 from .strategies import (
     apply_gate,
@@ -69,6 +77,7 @@ from .strategies import (
     carry_total_returns,
     ewma_variance,
     momentum_positions,
+    portfolio_scale,
     GateReport,
     regime_gate,
     regime_gate_report,
@@ -77,6 +86,11 @@ from .strategies import (
 )
 
 __all__ = [
+    "CostAssumptions",
+    "aum_at_sharpe_fraction",
+    "daily_cost_fraction",
+    "participation",
+    "trade_cost",
     "BootstrapResult",
     "BreakEven",
     "CombinedStream",
@@ -127,6 +141,8 @@ __all__ = [
     "load_dataset",
     "max_drawdown",
     "momentum_positions",
+    "portfolio_scale",
+    "scaled_book",
     "GateReport",
     "calm_guard_values",
     "regime_gate",
@@ -139,4 +155,4 @@ __all__ = [
     "validate_params",
 ]
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"

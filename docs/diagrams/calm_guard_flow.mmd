@@ -1,0 +1,16 @@
+flowchart TD
+    REFIT["Refit day t"] --> FIT["Fit on true window r[0..t]"]
+    FIT --> K0["k0 = argmin variance"]
+    K0 --> ON{"calm_guard m > 0?"}
+    ON -- "no (default)" --> USE0["k* = k0, filter over true window"]
+    ON -- "yes" --> W{"pi[k0] < m?"}
+    W -- "no" --> SEL["k* = select_calm_state(variances, pi, m)"]
+    W -- "yes: guard trips" --> REC["Append t to guard_trips"]
+    REC --> CLIP["winsorize_mad: clip to<br/>median +/- 8 x 1.4826 x MAD"]
+    CLIP --> REFIT2["Discard the model, refit on the clipped<br/>window from the same start"]
+    REFIT2 --> SEL
+    SEL --> PASS["Filter pass over the window<br/>the kept model was fitted on"]
+    USE0 --> NEXT["Forward steps on true returns until the next refit"]
+    PASS --> NEXT
+    NEXT --> WARM["Next refit warm-starts from the model kept<br/>and fits the true window first"]
+    WARM --> REFIT
