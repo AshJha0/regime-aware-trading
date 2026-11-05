@@ -340,7 +340,7 @@ fn gate_with(r: &[f64], min_days: usize, refit: usize, o: regime::GateOptions) -
 fn gate_band_range_is_checked() {
     for band in [-0.1, 1.1, f64::NAN] {
         assert!(regime::apply_gate_band(&[1.0], band).is_err());
-        let o = regime::GateOptions { gate_band: band, transition_floor: 0.0 };
+        let o = regime::GateOptions { gate_band: band, transition_floor: 0.0, calm_guard: 0.0 };
         assert!(gate_with(&[0.0; 10], 5, 63, o).is_err());
     }
 }
@@ -353,7 +353,7 @@ fn head_700() -> Vec<f64> {
 fn regime_gate_band_equals_post_processing() {
     let r = head_700();
     let raw = gate_with(&r, 504, 100, regime::GateOptions::default()).unwrap();
-    let o = regime::GateOptions { gate_band: 0.3, transition_floor: 0.0 };
+    let o = regime::GateOptions { gate_band: 0.3, transition_floor: 0.0, calm_guard: 0.0 };
     assert_eq!(gate_with(&r, 504, 100, o).unwrap(), regime::apply_gate_band(&raw, 0.3).unwrap());
 }
 
@@ -370,6 +370,36 @@ fn regime_gate_transition_floor_zero_is_bitwise_default() {
     let r = head_700();
     let plain = regime_gate(&r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8).unwrap().0;
     assert_eq!(gate_with(&r, 504, 100, regime::GateOptions::default()).unwrap(), plain);
-    let o = regime::GateOptions { gate_band: 0.0, transition_floor: 1e-6 };
+    let o = regime::GateOptions { gate_band: 0.0, transition_floor: 1e-6, calm_guard: 0.0 };
     assert!(gate_with(&r, 504, 100, o).unwrap().iter().all(|g| (0.0..=1.0).contains(g)));
+}
+
+// --- calm-state guard (API_SPEC 3.3) ---------------------------------------
+
+#[test]
+fn winsorize_by_hand() {
+    let got = regime::winsorize_mad(&[0.0, 1.0, 2.0, 3.0, 100.0], 2.0);
+    assert_eq!(got, vec![0.0, 1.0, 2.0, 3.0, 2.0 + 2.0 * 1.4826]);
+}
+
+#[test]
+fn winsorize_zero_scale_is_unchanged() {
+    let x = [1.0, 1.0, 1.0, 9.0];
+    assert_eq!(regime::winsorize_mad(&x, regime::CALM_CLIP_MADS), x.to_vec());
+}
+
+#[test]
+fn select_skips_thin_states_and_falls_back() {
+    let v = [1.0, 2.0, 3.0];
+    assert_eq!(regime::select_calm_state(&v, &[0.001, 0.7, 0.299], 0.01), 1);
+    assert_eq!(regime::select_calm_state(&v, &[0.3, 0.3, 0.4], 0.5), 2);
+}
+
+#[test]
+fn calm_guard_range_is_checked() {
+    for bad in [-0.1, 1.0] {
+        let options = regime::GateOptions { calm_guard: bad, ..Default::default() };
+        let err = regime::regime_gate_report(&[0.0; 10], 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, options);
+        assert!(err.unwrap_err().to_string().contains("calm_guard"));
+    }
 }

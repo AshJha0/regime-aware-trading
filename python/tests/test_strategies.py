@@ -1,5 +1,7 @@
 """Strategy tests: momentum sizing, carry schedule/tie-break, regime gate."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -9,8 +11,15 @@ from regime import (
     carry_total_returns,
     ewma_variance,
     momentum_positions,
+    load_dataset,
     regime_gate,
+    regime_gate_report,
+    select_calm_state,
+    winsorize_mad,
 )
+
+
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
 def test_momentum_rejects_short_series():
@@ -350,3 +359,69 @@ def test_regime_gate_transition_floor_zero_is_bitwise_default(index_returns):
     assert np.array_equal(plain, zero)
     assert np.all((floored >= 0.0) & (floored <= 1.0))
     assert all(m.transition_floor == 1e-6 for m in models)
+
+
+# --- calm-state guard (API_SPEC 3.3) ---------------------------------------
+
+
+def _guarded(r, cfg, guard):
+    return regime_gate_report(
+        r, n_states=cfg["n_states"], train_min_days=cfg["train_min_days"],
+        refit_days=cfg["refit_days"], mode=cfg["gate_mode"], threshold=cfg["gate_threshold"],
+        tol=cfg["em_tol"], max_iter=cfg["em_max_iter"], var_floor=cfg["var_floor"],
+        calm_guard=guard,
+    )
+
+
+def test_winsorize_mad_by_hand():
+    x = np.array([0.0, 1.0, 2.0, 3.0, 100.0])
+    # median 2, MAD 1, so the upper bound is 2 + 2 * 1.4826
+    assert winsorize_mad(x, 2.0).tolist() == [0.0, 1.0, 2.0, 3.0, 2.0 + 2.0 * 1.4826]
+
+
+def test_winsorize_mad_zero_scale_is_unchanged():
+    x = np.array([1.0, 1.0, 1.0, 9.0])
+    assert winsorize_mad(x).tolist() == x.tolist()
+
+
+def test_select_calm_state_skips_thin_states_and_falls_back():
+    v = np.array([1.0, 2.0, 3.0])
+    assert select_calm_state(v, np.array([0.001, 0.7, 0.299]), 0.01) == 1
+    assert select_calm_state(v, np.array([0.3, 0.3, 0.4]), 0.5) == 2
+
+
+def test_calm_guard_range_is_checked():
+    r = np.zeros(10)
+    for bad in (-0.1, 1.0):
+        with pytest.raises(ValueError, match="calm_guard"):
+            regime_gate_report(r, calm_guard=bad)
+
+
+def test_calm_guard_on_bundled_and_injected_data():
+    """Quiet on clean data; holds the gate near clean on one extreme print."""
+    ds = load_dataset(DATA_DIR)
+    cfg = ds.config
+    start = cfg["train_min_days"] - 1
+    off_clean = _guarded(ds.index_returns, cfg, 0.0)
+    on_clean = _guarded(ds.index_returns, cfg, 0.01)
+    assert on_clean.guard_trips == []
+    np.testing.assert_array_equal(on_clean.gate, off_clean.gate)
+    clean = off_clean.gate[start:].mean()
+    for shock in (-0.3, 0.5):
+        r = ds.index_returns.copy()
+        r[1000] = shock
+        off = _guarded(r, cfg, 0.0)
+        on = _guarded(r, cfg, 0.01)
+        assert off.guard_trips == []
+        assert off.gate[start:].mean() < clean - 0.25  # the failure being guarded
+        assert on.guard_trips and on.guard_trips[0] > 1000
+        assert abs(on.gate[start:].mean() - clean) < 0.05
+
+
+def test_regime_gate_warns_when_the_guard_trips():
+    ds = load_dataset(DATA_DIR)
+    cfg = ds.config
+    r = ds.index_returns.copy()
+    r[1000] = -0.3
+    with pytest.warns(RuntimeWarning, match="calm-state guard tripped"):
+        regime_gate(r, cfg["n_states"], cfg["train_min_days"], cfg["refit_days"], calm_guard=0.01)

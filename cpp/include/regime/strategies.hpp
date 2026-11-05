@@ -57,7 +57,21 @@ Matrix carry_total_returns(const Matrix& spot_returns, const Matrix& rate_diffs)
 struct RegimeGateResult {
     std::vector<double> gate;        ///< Gate values in [0, 1], length T.
     std::vector<GaussianHMM> models; ///< Fitted models in refit order.
+    std::vector<std::size_t> guard_trips; ///< Refit days the calm-state guard tripped.
 };
+
+/// Clip half-width of the calm-state guard in robust standard deviations
+/// (1.4826 * MAD).  Pinned, API_SPEC 3.3.
+inline constexpr double kCalmClipMads = 8.0;
+
+/// Clip x to median +/- width * 1.4826 * MAD (API_SPEC 3.3).  A zero MAD gives
+/// no usable scale, so x is returned unchanged.
+std::vector<double> winsorize_mad(const std::vector<double>& x, double width = kCalmClipMads);
+
+/// Lowest-variance state with stationary weight >= min_weight, ties to the
+/// lower label; if none qualifies, the largest weight, ties to the lower label.
+std::size_t select_calm_state(const std::vector<double>& variances,
+                              const std::vector<double>& weights, double min_weight);
 
 /// No-trade band on a gate series (API_SPEC 3.3):
 /// o[t] = g[t] if |g[t] - o[t-1]| > band else o[t-1], with o[-1] = 1.
@@ -78,6 +92,9 @@ std::vector<double> apply_gate_band(const std::vector<double>& gate, double band
 /// \param mode "prob" (gate = p_calm) or "binary" (1 if p_calm >= threshold).
 /// \param gate_band No-trade band in [0, 1] (apply_gate_band); default 0 (off).
 /// \param transition_floor Warm-start floor for the refits; default 0 (off).
+/// \param calm_guard Minimum stationary weight of the calm state in [0, 1);
+///        default 0 (off).  On a trip the refit day is recorded in guard_trips
+///        and the refit repeats on the winsorized window (API_SPEC 3.3).
 /// \throws std::invalid_argument if the series is shorter than
 ///         train_min_days, a return is <= -100 %, the mode is unknown, or
 ///         inputs are invalid.
@@ -86,7 +103,8 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns,
                              int refit_days = 63, const std::string& mode = "prob",
                              double threshold = 0.5, double tol = 1e-8,
                              int max_iter = 500, double var_floor = 1e-8,
-                             double gate_band = 0.0, double transition_floor = 0.0);
+                             double gate_band = 0.0, double transition_floor = 0.0,
+                             double calm_guard = 0.0);
 
 /// Scale each day's positions by that day's gate value:
 /// P_filtered[t] = gate[t] * P[t] (both day-t decisions, so the filtered

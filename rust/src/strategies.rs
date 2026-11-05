@@ -297,6 +297,66 @@ pub struct GateOptions {
     pub gate_band: f64,
     /// Warm-start floor for the refits (API_SPEC 1.3).
     pub transition_floor: f64,
+    /// Minimum stationary weight of the calm state in `[0, 1)`; 0 is off
+    /// (API_SPEC 3.3).  Use [`regime_gate_report`] to see the trips.
+    pub calm_guard: f64,
+}
+
+/// Clip half-width of the calm-state guard in robust standard deviations
+/// (1.4826 * MAD).  Pinned, API_SPEC 3.3.
+pub const CALM_CLIP_MADS: f64 = 8.0;
+
+/// Everything a walk-forward gate run produces.
+#[derive(Debug, Clone)]
+pub struct GateReport {
+    /// Gate values in `[0, 1]`, length `T`.
+    pub gate: Vec<f64>,
+    /// Fitted models in refit order.
+    pub models: Vec<GaussianHmm>,
+    /// Refit days on which the calm-state guard tripped, ascending.
+    pub guard_trips: Vec<usize>,
+}
+
+fn median_of(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Clip `x` to `median +/- width * 1.4826 * MAD` (API_SPEC 3.3).  A zero MAD
+/// gives no usable scale, so `x` is returned unchanged.
+pub fn winsorize_mad(x: &[f64], width: f64) -> Vec<f64> {
+    let med = median_of(x.to_vec());
+    let scale = 1.4826 * median_of(x.iter().map(|v| (v - med).abs()).collect());
+    if scale == 0.0 {
+        return x.to_vec();
+    }
+    let (lo, hi) = (med - width * scale, med + width * scale);
+    x.iter().map(|v| v.max(lo).min(hi)).collect()
+}
+
+/// Lowest-variance state with stationary weight `>= min_weight`, ties to the
+/// lower label; if none qualifies, the largest weight, ties to the lower label.
+pub fn select_calm_state(variances: &[f64], weights: &[f64], min_weight: f64) -> usize {
+    let mut best: Option<usize> = None;
+    for k in 0..variances.len() {
+        if weights[k] >= min_weight && best.is_none_or(|b| variances[k] < variances[b]) {
+            best = Some(k);
+        }
+    }
+    best.unwrap_or_else(|| {
+        let mut top = 0;
+        for k in 1..weights.len() {
+            if weights[k] > weights[top] {
+                top = k;
+            }
+        }
+        top
+    })
 }
 
 /// No-trade band on a gate series (API_SPEC 3.3):
@@ -324,11 +384,11 @@ pub fn apply_gate_band(gate: &[f64], band: f64) -> Result<Vec<f64>> {
         .collect())
 }
 
-/// [`regime_gate`] with [`GateOptions`].
+/// [`regime_gate`] with [`GateOptions`].  This form drops the guard days:
+/// call [`regime_gate_report`] when `calm_guard` is on.
 ///
 /// # Errors
-/// As [`regime_gate`], plus a return `<= -1` (the message names the day),
-/// `gate_band` outside `[0, 1]`, or an invalid `transition_floor`.
+/// As [`regime_gate_report`].
 #[allow(clippy::too_many_arguments)]
 pub fn regime_gate_with(
     index_returns: &[f64],
@@ -342,6 +402,43 @@ pub fn regime_gate_with(
     var_floor: f64,
     options: GateOptions,
 ) -> Result<(Vec<f64>, Vec<GaussianHmm>)> {
+    let report = regime_gate_report(
+        index_returns,
+        n_states,
+        train_min_days,
+        refit_days,
+        mode,
+        threshold,
+        tol,
+        max_iter,
+        var_floor,
+        options,
+    )?;
+    Ok((report.gate, report.models))
+}
+
+/// Walk-forward gate returning a [`GateReport`].  With `calm_guard` on, a
+/// refit whose lowest-variance state has stationary weight below it is
+/// recorded and repeated on the window clipped by [`winsorize_mad`]; forward
+/// steps and the backtest keep true returns (API_SPEC 3.3).
+///
+/// # Errors
+/// As [`regime_gate`], plus a return `<= -1` (the message names the day),
+/// `gate_band` outside `[0, 1]`, `calm_guard` outside `[0, 1)`, or an invalid
+/// `transition_floor`.
+#[allow(clippy::too_many_arguments)]
+pub fn regime_gate_report(
+    index_returns: &[f64],
+    n_states: usize,
+    train_min_days: usize,
+    refit_days: usize,
+    mode: &str,
+    threshold: f64,
+    tol: f64,
+    max_iter: usize,
+    var_floor: f64,
+    options: GateOptions,
+) -> Result<GateReport> {
     if index_returns.iter().any(|v| !v.is_finite()) {
         return Err(RegimeError::InvalidInput("index_returns contain NaN or inf".into()));
     }
@@ -367,6 +464,12 @@ pub fn regime_gate_with(
             options.gate_band
         )));
     }
+    if !(0.0..1.0).contains(&options.calm_guard) {
+        return Err(RegimeError::InvalidInput(format!(
+            "calm_guard must be in [0, 1), got {}",
+            options.calm_guard
+        )));
+    }
     // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
     GaussianHmm::new(n_states, tol, max_iter, var_floor)?
         .with_transition_floor(options.transition_floor)?;
@@ -388,22 +491,39 @@ pub fn regime_gate_with(
     let mut models: Vec<GaussianHmm> = Vec::new();
     let mut alpha: Vec<f64> = Vec::new();
     let mut calm_state = 0usize;
+    let mut guard_trips: Vec<usize> = Vec::new();
     for t in t0..t_total {
         if (t - t0) % refit_days == 0 {
             let mut model = GaussianHmm::new(n_states, tol, max_iter, var_floor)?
                 .with_transition_floor(options.transition_floor)?;
             let warm = models.last().and_then(|m| m.params()).cloned();
-            let window = full.head(t + 1)?;
-            let refit = |model: &mut GaussianHmm| -> Result<Vec<f64>> {
+            let mut window = full.head(t + 1)?;
+            let mut refit = |model: &mut GaussianHmm| -> Result<Vec<f64>> {
                 model.fit(&window, warm.as_ref())?;
+                calm_state = argmin_variance(model.params().expect("fit just succeeded"));
+                if options.calm_guard > 0.0 {
+                    if model.stationary_distribution()?[calm_state] < options.calm_guard {
+                        guard_trips.push(t);
+                        window = Matrix::column(&winsorize_mad(&index_returns[..=t], CALM_CLIP_MADS));
+                        *model = GaussianHmm::new(n_states, tol, max_iter, var_floor)?
+                            .with_transition_floor(options.transition_floor)?;
+                        model.fit(&window, warm.as_ref())?;
+                    }
+                    let params = model.params().expect("fit just succeeded");
+                    let variances: Vec<f64> =
+                        (0..n_states).map(|k| params.variances.get(k, 0)).collect();
+                    calm_state = select_calm_state(
+                        &variances,
+                        &model.stationary_distribution()?,
+                        options.calm_guard,
+                    );
+                }
                 let filtered = model.filtered_probabilities(&window)?;
                 Ok(filtered.row(t).to_vec())
             };
             alpha = refit(&mut model).map_err(|e| {
                 RegimeError::InvalidInput(format!("regime_gate refit at t={t}: {e}"))
             })?;
-            let params = model.params().expect("fit just succeeded");
-            calm_state = argmin_variance(params);
             models.push(model);
         } else {
             let params = models.last().and_then(|m| m.params()).expect("model fitted");
@@ -420,7 +540,7 @@ pub fn regime_gate_with(
             0.0
         };
     }
-    Ok((apply_gate_band(&gate, options.gate_band)?, models))
+    Ok(GateReport { gate: apply_gate_band(&gate, options.gate_band)?, models, guard_trips })
 }
 
 /// Index of the lowest-variance state on dimension 0 (ties -> lower label).

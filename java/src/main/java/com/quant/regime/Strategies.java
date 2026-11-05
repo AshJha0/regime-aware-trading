@@ -253,8 +253,66 @@ public final class Strategies {
      *
      * @param gate gate values in [0, 1], length T
      * @param models fitted models in refit order
+     * @param guardTrips refit days on which the calm-state guard tripped, ascending
      */
-    public record GateResult(double[] gate, List<GaussianHmm> models) {
+    public record GateResult(double[] gate, List<GaussianHmm> models, int[] guardTrips) {
+    }
+
+    /** Clip half-width of the calm-state guard in 1.4826 * MAD units (API_SPEC 3.3). */
+    public static final double CALM_CLIP_MADS = 8.0;
+
+    private static double medianOf(double[] values) {
+        double[] v = values.clone();
+        Arrays.sort(v);
+        int n = v.length;
+        return n % 2 == 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
+    }
+
+    /**
+     * Clips {@code x} to median +/- width * 1.4826 * MAD (API_SPEC 3.3). A zero
+     * MAD gives no usable scale, so a copy of {@code x} is returned unchanged.
+     */
+    public static double[] winsorizeMad(double[] x, double width) {
+        double med = medianOf(x);
+        double[] dev = new double[x.length];
+        for (int i = 0; i < x.length; i++) {
+            dev[i] = Math.abs(x[i] - med);
+        }
+        double scale = 1.4826 * medianOf(dev);
+        double[] out = x.clone();
+        if (scale == 0.0) {
+            return out;
+        }
+        double lo = med - width * scale;
+        double hi = med + width * scale;
+        for (int i = 0; i < out.length; i++) {
+            out[i] = Math.min(Math.max(out[i], lo), hi);
+        }
+        return out;
+    }
+
+    /**
+     * Lowest-variance state with stationary weight at least {@code minWeight},
+     * ties to the lower label; if none qualifies, the largest weight, ties to
+     * the lower label.
+     */
+    public static int selectCalmState(double[] variances, double[] weights, double minWeight) {
+        int best = -1;
+        for (int k = 0; k < variances.length; k++) {
+            if (weights[k] >= minWeight && (best < 0 || variances[k] < variances[best])) {
+                best = k;
+            }
+        }
+        if (best >= 0) {
+            return best;
+        }
+        best = 0;
+        for (int k = 1; k < weights.length; k++) {
+            if (weights[k] > weights[best]) {
+                best = k;
+            }
+        }
+        return best;
     }
 
     /**
@@ -296,7 +354,15 @@ public final class Strategies {
     public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
             int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor) {
         return regimeGate(indexReturns, nStates, trainMinDays, refitDays, mode, threshold, tol,
-                maxIter, varFloor, 0.0, 0.0);
+                maxIter, varFloor, 0.0, 0.0, 0.0);
+    }
+
+    /** The long form with the calm-state guard off. */
+    public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
+            int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor,
+            double gateBand, double transitionFloor) {
+        return regimeGate(indexReturns, nStates, trainMinDays, refitDays, mode, threshold, tol,
+                maxIter, varFloor, gateBand, transitionFloor, 0.0);
     }
 
     /**
@@ -347,11 +413,11 @@ public final class Strategies {
      * @return gate values and the fitted models in refit order
      * @throws IllegalArgumentException as the short form, plus a return
      *     &lt;= -100% (the message names the day), gateBand outside [0, 1] or
-     *     an invalid transitionFloor
+     *     an invalid transitionFloor, or calmGuard outside [0, 1)
      */
     public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
             int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor,
-            double gateBand, double transitionFloor) {
+            double gateBand, double transitionFloor, double calmGuard) {
         if (indexReturns == null) {
             throw new IllegalArgumentException("index_returns must be 1-D");
         }
@@ -375,6 +441,9 @@ public final class Strategies {
         if (!(gateBand >= 0.0 && gateBand <= 1.0)) {
             throw new IllegalArgumentException("gate_band must be in [0, 1], got " + gateBand);
         }
+        if (!(calmGuard >= 0.0 && calmGuard < 1.0)) {
+            throw new IllegalArgumentException("calm_guard must be in [0, 1), got " + calmGuard);
+        }
         // Validates nStates >= 2, tol/varFloor > 0, maxIter >= 1, the floor up front.
         new GaussianHmm(nStates, tol, maxIter, varFloor, transitionFloor);
         int t2 = indexReturns.length;
@@ -393,20 +462,35 @@ public final class Strategies {
         GaussianHmm model = null;
         double[] alpha = null;
         int calmState = 0;
+        List<Integer> trips = new ArrayList<>();
         for (int t = t0; t < t2; t++) {
             if ((t - t0) % refitDays == 0) {
                 model = new GaussianHmm(nStates, tol, maxIter, varFloor, transitionFloor);
                 HmmParams warm = models.isEmpty() ? null : models.get(models.size() - 1).params().copy();
                 double[] window = Arrays.copyOfRange(indexReturns, 0, t + 1);
                 try {
+                    HmmParams warmCopy = warm == null ? null : warm.copy();
                     model.fit(window, warm);
+                    calmState = argminVariance(model.params());
+                    if (calmGuard > 0.0) {
+                        if (model.stationaryDistribution()[calmState] < calmGuard) {
+                            trips.add(t);
+                            window = winsorizeMad(window, CALM_CLIP_MADS);
+                            model = new GaussianHmm(nStates, tol, maxIter, varFloor, transitionFloor);
+                            model.fit(window, warmCopy);
+                        }
+                        double[] v = new double[nStates];
+                        for (int k = 0; k < nStates; k++) {
+                            v[k] = model.params().variances[k][0];
+                        }
+                        calmState = selectCalmState(v, model.stationaryDistribution(), calmGuard);
+                    }
                     double[][] filt = model.filteredProbabilities(window);
                     alpha = filt[filt.length - 1];
                 } catch (IllegalArgumentException e) {
                     throw new IllegalArgumentException("regime_gate refit at t=" + t + ": " + e.getMessage(), e);
                 }
                 models.add(model);
-                calmState = argminVariance(model.params());
             } else {
                 try {
                     alpha = GaussianHmm.forwardStep(model.params(), alpha, new double[] {indexReturns[t]});
@@ -418,7 +502,8 @@ public final class Strategies {
             double pCalm = alpha[calmState];
             gate[t] = "prob".equals(mode) ? pCalm : (pCalm >= threshold ? 1.0 : 0.0);
         }
-        return new GateResult(applyGateBand(gate, gateBand), models);
+        int[] guardTrips = trips.stream().mapToInt(Integer::intValue).toArray();
+        return new GateResult(applyGateBand(gate, gateBand), models, guardTrips);
     }
 
     /** Pinned gate-state rule: lowest variance on dimension 0, ties to the lower label. */

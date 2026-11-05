@@ -251,7 +251,9 @@ sequenceDiagram
   window changes little in 63 days) and keeps state identities stable
   across refits; the calm state is nevertheless re-identified per model by
   `argmin variance` rather than trusted by label — walk-forward fits can
-  reorganize.
+  reorganize. The opt-in `calm_guard` (API_SPEC 3.3) adds a stationary-weight
+  check to that choice, because the raw argmin can land on a state holding
+  one outlier.
 * **Stationary distribution by power method** (pinned) rather than an
   eigen-solver: three lines, no linear-algebra dependency in the native
   ports, tolerance 1e-13 with a 10000-iteration cap, and the result is
@@ -440,7 +442,7 @@ system; here is where each piece plugs in and what has to be replaced.
    model (impact, bid/ask, financing) before quoting numbers externally.
 5. **Cross-language deployment.** The reference is Python; the C++/Rust/
    Java ports are for hosting the model inside a C++, Rust or JVM stack
-   and are held to the same 80 golden scalars, the same validation rules
+   and are held to the same 83 golden scalars, the same validation rules
    and the same error family. A port that is modified locally should be
    re-run against `data/golden/golden.json` and
    `tools/check_cookbook.py` before use.

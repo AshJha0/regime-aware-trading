@@ -12,6 +12,8 @@ probabilities) and models fitted on data through day ``t``.
 
 from __future__ import annotations
 
+import warnings
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -19,6 +21,10 @@ import numpy as np
 from .hmm import GaussianHMM, HMMParams, forward_step
 
 TRADING_DAYS = 252
+
+#: Clip half-width of the calm-state guard, in robust standard deviations
+#: (1.4826 * MAD).  Pinned, API_SPEC 3.3.
+CALM_CLIP_MADS = 8.0
 
 
 def _validate_returns(returns: np.ndarray, name: str = "returns", simple_returns: bool = False) -> np.ndarray:
@@ -236,6 +242,47 @@ def apply_gate_band(gate: np.ndarray, band: float) -> np.ndarray:
     return out
 
 
+@dataclass
+class GateReport:
+    """Everything a walk-forward gate run produces.
+
+    Attributes:
+        gate: Gate values in [0, 1], shape ``(T,)``.
+        models: Fitted models in refit order.
+        guard_trips: Refit days ``t`` on which the calm-state guard tripped,
+            ascending.  Always empty when the guard is off.
+    """
+
+    gate: np.ndarray
+    models: List[GaussianHMM]
+    guard_trips: List[int]
+
+
+def winsorize_mad(x: np.ndarray, width: float = CALM_CLIP_MADS) -> np.ndarray:
+    """Clip ``x`` to ``median +/- width * 1.4826 * MAD`` (API_SPEC 3.3).
+
+    A zero MAD gives no usable scale, so ``x`` is returned unchanged.
+    """
+    med = float(np.median(x))
+    scale = 1.4826 * float(np.median(np.abs(x - med)))
+    if scale == 0.0:
+        return x.copy()
+    return np.clip(x, med - width * scale, med + width * scale)
+
+
+def select_calm_state(variances: np.ndarray, weights: np.ndarray, min_weight: float) -> int:
+    """Lowest-variance state whose stationary weight is at least ``min_weight``.
+
+    Ties go to the lower label.  If no state qualifies, the state with the
+    largest weight is returned (ties to the lower label).
+    """
+    best = -1
+    for k in range(len(variances)):
+        if weights[k] >= min_weight and (best < 0 or variances[k] < variances[best]):
+            best = k
+    return best if best >= 0 else int(np.argmax(weights))
+
+
 def regime_gate(
     index_returns: np.ndarray,
     n_states: int = 3,
@@ -248,7 +295,41 @@ def regime_gate(
     var_floor: float = 1e-8,
     gate_band: float = 0.0,
     transition_floor: float = 0.0,
+    calm_guard: float = 0.0,
 ) -> Tuple[np.ndarray, List[GaussianHMM]]:
+    """Walk-forward gate; :func:`regime_gate_report` without the guard days.
+
+    Takes the same arguments and raises the same errors.  Emits a
+    ``RuntimeWarning`` if the calm-state guard trips, so a caller of this
+    shorter form still hears about it.
+    """
+    report = regime_gate_report(
+        index_returns, n_states, train_min_days, refit_days, mode, threshold,
+        tol, max_iter, var_floor, gate_band, transition_floor, calm_guard,
+    )
+    if report.guard_trips:
+        warnings.warn(
+            f"regime_gate: calm-state guard tripped at refit days {report.guard_trips}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return report.gate, report.models
+
+
+def regime_gate_report(
+    index_returns: np.ndarray,
+    n_states: int = 3,
+    train_min_days: int = 504,
+    refit_days: int = 63,
+    mode: str = "prob",
+    threshold: float = 0.5,
+    tol: float = 1e-8,
+    max_iter: int = 500,
+    var_floor: float = 1e-8,
+    gate_band: float = 0.0,
+    transition_floor: float = 0.0,
+    calm_guard: float = 0.0,
+) -> GateReport:
     """Walk-forward HMM regime gate on a market proxy.
 
     Pinned schedule: the first fit happens at day ``t0 = train_min_days - 1``
@@ -284,15 +365,22 @@ def regime_gate(
             Default 0 (off).
         transition_floor: Warm-start floor passed to :class:`GaussianHMM`.
             Default 0 (off).
+        calm_guard: Minimum stationary weight of the calm state, in
+            ``[0, 1)``.  Default 0 (off).  When the lowest-variance state of
+            a refit falls below it, the refit day is recorded, the refit is
+            repeated on the window clipped by :func:`winsorize_mad`, and
+            :func:`select_calm_state` picks the state.  Clipping stays
+            inside that fit and its filter pass: forward steps and the
+            backtest see true returns (API_SPEC 3.3).
 
     Returns:
-        ``(gate, models)``: gate values in [0, 1], shape ``(T,)``, and the
-        list of fitted models in refit order.
+        A :class:`GateReport`.
 
     Raises:
         ValueError: If the series is shorter than ``train_min_days``, a
             return is ``<= -100%`` (pinned), the mode is unknown,
-            ``threshold`` or ``gate_band`` is outside ``[0, 1]``, the HMM
+            ``threshold`` or ``gate_band`` is outside ``[0, 1]``,
+            ``calm_guard`` is outside ``[0, 1)``, the HMM
             settings are invalid (``n_states < 2`` etc.), or a refit fails
             (the message then names the refit day ``t``).
     """
@@ -310,6 +398,8 @@ def regime_gate(
         raise ValueError(f"gate threshold must be in [0, 1], got {threshold}")
     if not 0.0 <= gate_band <= 1.0:
         raise ValueError(f"gate_band must be in [0, 1], got {gate_band}")
+    if not 0.0 <= calm_guard < 1.0:
+        raise ValueError(f"calm_guard must be in [0, 1), got {calm_guard}")
     # Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
     GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor, transition_floor=transition_floor)
     T = r.shape[0]
@@ -324,19 +414,33 @@ def regime_gate(
     model: Optional[GaussianHMM] = None
     alpha: Optional[np.ndarray] = None
     calm_state = 0
+    guard_trips: List[int] = []
     for t in range(t0, T):
         if (t - t0) % refit_days == 0:
             model = GaussianHMM(
                 n_states, tol=tol, max_iter=max_iter, var_floor=var_floor, transition_floor=transition_floor
             )
             warm = models[-1].params.copy() if models else None
+            window = r[: t + 1]
             try:
-                model.fit(r[: t + 1], init=warm)
-                alpha = model.filtered_probabilities(r[: t + 1])[-1]
+                model.fit(window, init=None if warm is None else warm.copy())
+                calm_state = int(np.argmin(model.params.variances[:, 0]))
+                if calm_guard > 0.0:
+                    if model.stationary_distribution()[calm_state] < calm_guard:
+                        guard_trips.append(t)
+                        window = winsorize_mad(window)
+                        model = GaussianHMM(
+                            n_states, tol=tol, max_iter=max_iter, var_floor=var_floor,
+                            transition_floor=transition_floor,
+                        )
+                        model.fit(window, init=warm)
+                    calm_state = select_calm_state(
+                        model.params.variances[:, 0], model.stationary_distribution(), calm_guard
+                    )
+                alpha = model.filtered_probabilities(window)[-1]
             except ValueError as exc:
                 raise ValueError(f"regime_gate refit at t={t}: {exc}") from exc
             models.append(model)
-            calm_state = int(np.argmin(model.params.variances[:, 0]))
         else:
             assert model is not None and model.params is not None and alpha is not None
             try:
@@ -345,7 +449,7 @@ def regime_gate(
                 raise ValueError(f"regime_gate forward step at t={t}: {exc}") from exc
         p_calm = float(alpha[calm_state])
         gate[t] = p_calm if mode == "prob" else (1.0 if p_calm >= threshold else 0.0)
-    return apply_gate_band(gate, gate_band), models
+    return GateReport(apply_gate_band(gate, gate_band), models, guard_trips)
 
 
 def apply_gate(positions: np.ndarray, gate: np.ndarray) -> np.ndarray:

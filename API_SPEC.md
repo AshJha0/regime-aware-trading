@@ -359,10 +359,10 @@ Require `1 <= top_n`, `1 <= bottom_n`, `top_n + bottom_n <= A`,
 
 Config: `n_states = 3`, `train_min_days = 504`, `refit_days = 63`,
 `gate_mode = "prob"` (alternative `"binary"`), `gate_threshold = 0.5`,
-`gate_band = 0` and `transition_floor = 0` (both optional, off by default).
+`gate_band = 0`, `transition_floor = 0` and `calm_guard = 0` (all optional, off by default).
 Fitted on the market-index return series. Require
 `T >= train_min_days > n_states`, `refit_days >= 1`,
-`0 <= gate_threshold <= 1`, `0 <= gate_band <= 1`, a valid
+`0 <= gate_threshold <= 1`, `0 <= gate_band <= 1`, `0 <= calm_guard < 1`, a valid
 `transition_floor` (1.3), and valid HMM settings (`n_states >= 2`,
 `tol > 0`, `max_iter >= 1`, `var_floor > 0`) — all checked **before** the
 first fit; unknown mode is an error. A refit or forward step that fails
@@ -377,6 +377,55 @@ re-raises the same error type with the day index prepended
   `k* = argmin_k variances[k, 0]` of the current model (lowest variance;
   ties -> lower label). Variance, not mean, identifies the benign regime
   robustly.
+* **Calm-state guard (pinned, opt-in)**: one extreme return can take a
+  state for itself. That state holds one observation, its variance sits at
+  `var_floor`, it wins the argmin above, and the gate then reads a state the
+  chain almost never visits, with every fit reporting `converged`. With
+  `calm_guard = m > 0`, each refit at day `t` runs:
+
+  1. Fit on `r[0..t]` as usual and take `k0 = argmin_k variances[k, 0]`.
+  2. If `pi[k0] < m`, where `pi` is the stationary distribution (1.7 pinned
+     power method), the guard **trips**: append `t` to `guard_trips`, clip
+     the window with `winsorize_mad`, and fit a new model on the clipped
+     window from the same start (the same warm parameters, or the pinned
+     init on the first fit). The first model is discarded.
+  3. `k* = select_calm_state(variances[:, 0], pi, m)` on the model kept: the
+     lowest variance among states with `pi[k] >= m`, ties to the lower
+     label; if no state qualifies, the largest `pi`, ties to the lower label.
+  4. The filter pass of that refit runs over the same window the model was
+     fitted on. Later refits warm-start from the model kept and first fit
+     the true window again, so a refit trips only if the raw fit collapses.
+
+  `winsorize_mad(x, c)` clips to `median(x) +/- c * 1.4826 * MAD`, with
+  `MAD = median(|x - median(x)|)`, the median of an even count being the
+  mean of the middle two, and `c = 8` pinned (`CALM_CLIP_MADS`). If the MAD
+  is 0 the window is returned unchanged. Clipping stays inside the fit and
+  that refit's filter pass: forward steps between refits, the backtests and
+  the returned series all use true returns. `m = 0` runs none of this, so
+  the output is bit-identical to a build without the guard.
+
+  The flag is `guard_trips`, the ascending refit days: `GateReport` from
+  Python `regime_gate_report` and Rust `regime_gate_report`,
+  `RegimeGateResult::guard_trips` in C++, `GateResult.guardTrips()` in
+  Java, and the same field on each pipeline result. Python `regime_gate`
+  also emits a `RuntimeWarning` on a trip. Rust `regime_gate_with` keeps its
+  two-part return and drops the days, so use the report form with the guard on.
+
+  Measured on the bundled data with `m = 0.01` (mean gate from `t0` on,
+  clean 0.598, unguarded 0.276 at t=1000 and 0.126 at t=700):
+
+  | injected return | guard on | trips of 24 | days more than 0.25 from clean |
+  |---|---|---|---|
+  | -30 % at t=1000 | 0.617 | 1 | 15 |
+  | +50 % at t=1000 | 0.636 | 2 | 86 |
+  | -30 % at t=700 | 0.620 | 5 | 15 |
+
+  The clean run never trips. Results barely moved for `c` in {6, 8, 12}.
+  Selection without the clipped refit gave 0.697: the outlier still used up
+  one of the K states. The guard narrows the damage and does not remove it:
+  the mean stays 0.02 to 0.04 high and single days can still differ widely,
+  in the +50 % case as late as t=1902. `m = 0.01` is a guard value
+  checked on this one sample and one DGP, not a tuned or general setting.
 * **Gate value**: `p_calm(t) = P(s_t = k* | r_0..r_t)` — the **filtered**
   probability under the current model. At a refit day it comes from a
   full scaled forward pass over `r[0..t]`; between refits it is advanced
@@ -432,8 +481,8 @@ floats printed with `%.10f`:
 `momentum_lookback`, `vol_target`, `ewma_lambda`, `leverage_cap`,
 `carry_top_n`, `carry_bottom_n`, `rebalance_days`, `train_min_days`,
 `refit_days`, `gate_mode`, `gate_threshold`, `cost_bps`, `trading_days`.
-Optional keys `gate_band` and `transition_floor` must be finite numbers
-when present; an absent key means 0 (the bundled file has neither). Range
+Optional keys `gate_band`, `transition_floor` and `calm_guard` must be finite numbers
+when present; an absent key means 0 (the bundled file has none of them). Range
 checks are those of 3.3. Integer keys must hold integral values (`3.0` is rejected by every
 loader; `trading_days` is informational — the annualization constant 252
 is compiled into every port). `true_states.csv` labels must be integers
@@ -486,8 +535,15 @@ suite loads this file and asserts each `expect` key within `tol`
 | `carry_rerank_positions` | `mean_turnover`, `turnover_day21`, `turnover_day42`, `pos_day{15,21,42}_asset{0,3}` | 0 (exact) |
 | `carry_rerank_backtest` | `ann_return`, `sharpe`, `max_dd` | 1e-8 |
 | `gate_band_0p3` | `mean_turnover_momentum`, `mean_turnover_carry` (mean daily, filtered), `sharpe_combined` (full sample, filtered) | 1e-8 |
+| `calm_guard_injected` | `mean_gate` (from `t0` on), `trip_count`, `first_trip_day` (-1 if none) | 1e-6 |
 
-21 cases, 80 scalars; every language's golden test compares all 80.
+22 cases, 83 scalars; every language's golden test compares all 83.
+
+**`calm_guard_injected`**: `inputs = {calm_guard: 0.01, inject_t: 1000,
+inject_return: -0.3}`. Every port replaces `r[inject_t]` in the index
+returns and reruns the gate with the guard on and no band or floor
+(`calm_guard_values`). The tolerance matches the HMM log-likelihood cases
+because the value rests on full EM fits.
 
 **`gate_band_0p3`**: `inputs = {gate_band: 0.3}`. Every port applies
 `apply_gate_band` to the pipeline gate and reruns the filtered backtests

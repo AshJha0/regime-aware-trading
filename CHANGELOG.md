@@ -8,7 +8,8 @@ All notable changes to this project are recorded here. Versions follow
 - Replaced the README headline with post-warm-up evidence; added `regime.evaluation`, `tools/evaluate_gate.py` and `docs/GATE_EVALUATION.md`.
 - Added opt-in `gate_band` and `transition_floor`, `RegimeFilter` and filter benchmarks in all four languages; `regime_gate` now rejects returns <= -100 %.
 - Added CI for all four languages, `pyproject.toml`; goldens are now 21 cases / 80 scalars.
-- Known issue: one extreme print can capture the calm state.
+- Added opt-in `calm_guard` in all four languages: a refit whose lowest-variance state has too little stationary weight is flagged in `guard_trips` and repeated on a clipped window. Off by default, so the 21 existing golden cases are unchanged; goldens are now 22 cases / 83 scalars.
+- Known issue: with the guard off, which is the default, one extreme print can still capture the calm state. With it on, the mean gate stays 0.02 to 0.04 above clean.
 
 ### Added
 

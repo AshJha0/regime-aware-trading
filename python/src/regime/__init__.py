@@ -56,6 +56,7 @@ from .pipeline import (
     Dataset,
     carry_rerank_panel,
     carry_rerank_values,
+    calm_guard_values,
     gate_band_values,
     golden_cases,
     load_dataset,
@@ -68,7 +69,11 @@ from .strategies import (
     carry_total_returns,
     ewma_variance,
     momentum_positions,
+    GateReport,
     regime_gate,
+    regime_gate_report,
+    select_calm_state,
+    winsorize_mad,
 )
 
 __all__ = [
@@ -122,7 +127,12 @@ __all__ = [
     "load_dataset",
     "max_drawdown",
     "momentum_positions",
+    "GateReport",
+    "calm_guard_values",
     "regime_gate",
+    "regime_gate_report",
+    "select_calm_state",
+    "winsorize_mad",
     "run_backtest",
     "run_full_pipeline",
     "state_conditional_returns",

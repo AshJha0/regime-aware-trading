@@ -31,11 +31,12 @@ pub use hmm::{
 };
 pub use matrix::Matrix;
 pub use pipeline::{
-    carry_rerank_panel, carry_rerank_values, gate_band_values, golden_values, load_dataset,
+    calm_guard_values, carry_rerank_panel, carry_rerank_values, gate_band_values, golden_values, load_dataset,
     run_full_pipeline,
     CarryRerankInputs, Config, Dataset, PipelineOutput,
 };
 pub use strategies::{
     apply_gate, apply_gate_band, carry_positions, carry_total_returns, ewma_variance,
-    momentum_positions, regime_gate, regime_gate_with, GateOptions,
+    momentum_positions, regime_gate, regime_gate_report, regime_gate_with, select_calm_state,
+    winsorize_mad, GateOptions, GateReport, CALM_CLIP_MADS,
 };
