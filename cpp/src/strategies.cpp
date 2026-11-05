@@ -163,10 +163,48 @@ std::vector<double> apply_gate_band(const std::vector<double>& gate, double band
     return out;
 }
 
+namespace {
+
+double median_of(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    return n % 2 == 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
+}
+
+}  // namespace
+
+std::vector<double> winsorize_mad(const std::vector<double>& x, double width) {
+    const double med = median_of(x);
+    std::vector<double> dev(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) dev[i] = std::abs(x[i] - med);
+    const double scale = 1.4826 * median_of(dev);
+    if (scale == 0.0) return x;
+    const double lo = med - width * scale;
+    const double hi = med + width * scale;
+    std::vector<double> out(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) out[i] = std::min(std::max(x[i], lo), hi);
+    return out;
+}
+
+std::size_t select_calm_state(const std::vector<double>& variances,
+                              const std::vector<double>& weights, double min_weight) {
+    bool found = false;
+    std::size_t best = 0;
+    for (std::size_t k = 0; k < variances.size(); ++k)
+        if (weights[k] >= min_weight && (!found || variances[k] < variances[best])) {
+            best = k;
+            found = true;
+        }
+    if (found) return best;
+    for (std::size_t k = 1; k < weights.size(); ++k)
+        if (weights[k] > weights[best]) best = k;
+    return best;
+}
+
 RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_states,
                              int train_min_days, int refit_days, const std::string& mode,
                              double threshold, double tol, int max_iter, double var_floor,
-                             double gate_band, double transition_floor) {
+                             double gate_band, double transition_floor, double calm_guard) {
     for (double v : index_returns)
         if (!std::isfinite(v)) throw std::invalid_argument("index_returns contain NaN or inf");
     for (std::size_t t = 0; t < index_returns.size(); ++t)
@@ -182,6 +220,9 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
     if (!(gate_band >= 0.0 && gate_band <= 1.0))
         throw std::invalid_argument("gate_band must be in [0, 1], got " +
                                     std::to_string(gate_band));
+    if (!(calm_guard >= 0.0 && calm_guard < 1.0))
+        throw std::invalid_argument("calm_guard must be in [0, 1), got " +
+                                    std::to_string(calm_guard));
     // Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
     GaussianHMM(n_states, tol, max_iter, var_floor, transition_floor);
     const std::size_t T = index_returns.size();
@@ -208,6 +249,35 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
                 } else {
                     model.fit(window, out.models.back().params());  // warm start
                 }
+                // Pinned gate state: lowest variance on dimension 0 (ties -> lower label).
+                const auto lowest_variance = [](const GaussianHMM& m) {
+                    const Matrix& vars = m.params().variances;
+                    std::size_t best = 0;
+                    for (std::size_t k = 1; k < vars.rows; ++k)
+                        if (vars(k, 0) < vars(best, 0)) best = k;
+                    return best;
+                };
+                calm_state = lowest_variance(model);
+                if (calm_guard > 0.0) {
+                    if (model.stationary_distribution()[calm_state] < calm_guard) {
+                        out.guard_trips.push_back(t);
+                        const std::vector<double> raw(index_returns.begin(),
+                                                      index_returns.begin() +
+                                                          static_cast<std::ptrdiff_t>(t + 1));
+                        const std::vector<double> clipped = winsorize_mad(raw);
+                        for (std::size_t u = 0; u <= t; ++u) window(u, 0) = clipped[u];
+                        model = GaussianHMM(n_states, tol, max_iter, var_floor, transition_floor);
+                        if (out.models.empty()) {
+                            model.fit(window);
+                        } else {
+                            model.fit(window, out.models.back().params());
+                        }
+                    }
+                    const Matrix& vars = model.params().variances;
+                    std::vector<double> v(vars.rows);
+                    for (std::size_t k = 0; k < vars.rows; ++k) v[k] = vars(k, 0);
+                    calm_state = select_calm_state(v, model.stationary_distribution(), calm_guard);
+                }
                 Matrix filt = model.filtered_probabilities(window);
                 alpha.assign(filt.cols, 0.0);
                 for (std::size_t k = 0; k < filt.cols; ++k) alpha[k] = filt(t, k);
@@ -215,11 +285,6 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
                 throw std::invalid_argument("regime_gate refit at t=" + std::to_string(t) + ": " +
                                             e.what());
             }
-            // Pinned gate state: lowest variance on dimension 0 (ties -> lower label).
-            const Matrix& vars = model.params().variances;
-            calm_state = 0;
-            for (std::size_t k = 1; k < vars.rows; ++k)
-                if (vars(k, 0) < vars(calm_state, 0)) calm_state = k;
             out.models.push_back(std::move(model));
         } else {
             try {

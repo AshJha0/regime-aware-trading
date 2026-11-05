@@ -292,6 +292,20 @@
         "sharpe_combined": 2.0290749903226257
       },
       "tol": 1e-08
+    },
+    {
+      "name": "calm_guard_injected",
+      "inputs": {
+        "calm_guard": 0.01,
+        "inject_t": 1000,
+        "inject_return": -0.3
+      },
+      "expect": {
+        "mean_gate": 0.6168555463367579,
+        "trip_count": 1.0,
+        "first_trip_day": 1007.0
+      },
+      "tol": 1e-06
     }
   ]
 }

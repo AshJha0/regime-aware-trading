@@ -27,7 +27,7 @@ fn load_golden() -> GoldenFile {
     serde_json::from_str(&text).expect("golden.json parses")
 }
 
-const REQUIRED: [&str; 21] = [
+const REQUIRED: [&str; 22] = [
     "hmm_k2_loglik",
     "hmm_k3_loglik",
     "hmm_k3_means",
@@ -49,13 +49,14 @@ const REQUIRED: [&str; 21] = [
     "carry_rerank_positions",
     "carry_rerank_backtest",
     "gate_band_0p3",
+    "calm_guard_injected",
 ];
 
 #[test]
 fn golden_file_has_expected_cases() {
     let golden = load_golden();
     let names: Vec<&str> = golden.cases.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names.len(), 21);
+    assert_eq!(names.len(), 22);
     for required in REQUIRED {
         assert!(names.contains(&required), "missing golden case {required}");
     }
@@ -90,6 +91,17 @@ fn golden_values_reproduced() {
             let band = case.inputs["gate_band"].as_f64().expect("gate_band input");
             computed.insert(case.name.clone(), regime::gate_band_values(&pipe, band).expect("band case runs"));
         }
+        if case.name == "calm_guard_injected" {
+            let num = |k: &str| case.inputs[k].as_f64().expect("calm_guard input");
+            let values = regime::calm_guard_values(
+                &pipe,
+                num("calm_guard"),
+                num("inject_t") as usize,
+                num("inject_return"),
+            )
+            .expect("guard case runs");
+            computed.insert(case.name.clone(), values);
+        }
         let got = computed
             .get(&case.name)
             .unwrap_or_else(|| panic!("case {} not computed", case.name));
@@ -110,7 +122,7 @@ fn golden_values_reproduced() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 80, "every scalar across the 21 cases must be compared");
+    assert_eq!(checked, 83, "every scalar across the 22 cases must be compared");
 }
 
 #[test]

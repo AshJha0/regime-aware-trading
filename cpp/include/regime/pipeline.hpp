@@ -50,6 +50,7 @@ struct PipelineConfig {
     int trading_days{252};
     double gate_band{0.0};         ///< Optional key; absent means 0 (off).
     double transition_floor{0.0};  ///< Optional key; absent means 0 (off).
+    double calm_guard{0.0};        ///< Optional key; absent means 0 (off).
 };
 
 /// Bundled market data.
@@ -82,6 +83,7 @@ struct PipelineResult {
     std::vector<double> stationary3;     ///< Stationary distribution of the K=3 fit.
     double viterbi_accuracy{0.0};        ///< Viterbi vs mapped true states.
     std::vector<double> gate;            ///< Walk-forward regime gate values.
+    std::vector<std::size_t> guard_trips;  ///< Refit days the calm-state guard tripped.
     std::map<std::string, BacktestResult> results;      ///< momentum/carry x un/filtered.
     std::map<std::string, CombinedResult> combined;     ///< "unfiltered", "filtered".
     std::map<std::string, std::vector<StateStats>> crisis;  ///< Per-strategy state table.
@@ -93,6 +95,17 @@ struct GateBandValues {
     double mean_turnover_carry{0.0};     ///< Mean daily turnover, filtered carry.
     double sharpe_combined{0.0};         ///< Full-sample Sharpe of the 50/50 book.
 };
+
+/// The `calm_guard_injected` golden scalars (API_SPEC 5).
+struct CalmGuardValues {
+    double mean_gate{0.0};        ///< Mean gate from the first fit on.
+    double trip_count{0.0};       ///< Number of guard trips.
+    double first_trip_day{-1.0};  ///< First trip day, -1 if none.
+};
+
+/// Gate with r[inject_t] replaced by \p inject_return and the guard on.
+CalmGuardValues calm_guard_values(const PipelineResult& pipe, double calm_guard,
+                                  std::size_t inject_t, double inject_return);
 
 /// Filtered backtests with the pipeline's gate banded by \p band.  The band
 /// only post-processes the gate, so no refit is needed.

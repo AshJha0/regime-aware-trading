@@ -38,7 +38,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 <header>
   <div class="wrap">
     <h1>regime-aware-trading</h1>
-    <p>A four-language reference implementation (Python reference, C++, Rust, Java) of a regime-aware trading study: a diagonal-covariance Gaussian hidden Markov model — scaled forward-backward, deterministic Baum-Welch EM, Viterbi decoding, AIC/BIC model selection — fitted walk-forward on a market index and used to gate time-series momentum and an FX carry basket through a shared no-lookahead backtest engine. Initialisation, convergence semantics, the dead-state guard, label ordering, rebalance schedules, accounting and validation are all pinned in API_SPEC.md, no library code uses an RNG, and all four ports reproduce 21 golden cases (80 scalars) to 1e-6..1e-8.</p>
+    <p>A four-language reference implementation (Python reference, C++, Rust, Java) of a regime-aware trading study: a diagonal-covariance Gaussian hidden Markov model — scaled forward-backward, deterministic Baum-Welch EM, Viterbi decoding, AIC/BIC model selection — fitted walk-forward on a market index and used to gate time-series momentum and an FX carry basket through a shared no-lookahead backtest engine. Initialisation, convergence semantics, the dead-state guard, label ordering, rebalance schedules, accounting and validation are all pinned in API_SPEC.md, no library code uses an RNG, and all four ports reproduce 22 golden cases (83 scalars) to 1e-6..1e-8.</p>
     <nav>
       <a href="https://github.com/AshJha0/regime-aware-trading/blob/main/LEARN.md">Learn (guide)</a>
       <a class="secondary" href="https://github.com/AshJha0/regime-aware-trading/blob/main/COOKBOOK.md">Cookbook</a>
@@ -54,8 +54,8 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 <div class="wrap">
   <h2>Measured, not claimed</h2>
   <div class="numbers"><table>
-    <tr><td>Cross-language parity</td><td>python 112 · cpp 86 · rust 87 · java 86 tests, run by CI on every pull request, plus 60 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
-    <tr><td>Golden suite</td><td>21 named cases / 80 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
+    <tr><td>Cross-language parity</td><td>python 118 · cpp 90 · rust 91 · java 90 tests, run by CI on every pull request, plus 60 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
+    <tr><td>Golden suite</td><td>22 named cases / 83 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
     <tr><td>Ground truth</td><td>forward likelihood, smoothed marginals and the Viterbi path checked against brute-force sums over all 8 paths of a K = 2, T = 3 model (1e-12); EM monotone on the bundled index; transition rows sum to 1 (1e-12); <code>pi P = pi</code> (1e-10)</td></tr>
     <tr><td>Determinism</td><td>no RNG in library code (only the seeded generator, numpy <code>default_rng(83)</code>); pinned Hyndman-Fan-7 quantile initialisation, iteration order and tie-breaks; two fits are bitwise identical; any cross-language drift is a bug, not noise</td></tr>
     <tr><td>No lookahead</td><td>P[t] decided at the close of day t from data through t, earns r[t+1]; the walk-forward gate uses filtered (causal) probabilities under a model fitted on r[0..t], refit every 63 days on an expanding window; a one-day-shift test enforces it</td></tr>
@@ -65,7 +65,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <tr><td>Strategy config</td><td>momentum: 252-day signal, EWMA vol target (λ = 0.94), 4× leverage cap · carry: rank differentials, top/bottom 3 of 6, 21-day rebalance · costs 5 bp one-way on turnover · 252-day annualisation, raw Sharpe</td></tr>
   </table></div>
 
-  <div class="honest"><strong>What the latest review found.</strong> The code is careful: no lookahead was found, EM converged on all 24 refits, and 40 random starts found nothing better. The research claim did not survive: the gate adds no edge over a free volatility rule, its daily moves lift carry turnover from 0.25 to 18.4 a year, and its break-even cost on the bundled path is 2.8 bp. The bundled seed is also unrepresentative, with a 1.49 unfiltered Sharpe against a 0.35 average across seeds. One known bug remains: a single extreme print can capture the calm state and halve the gate. The review added the evaluation harness, CI for all four languages, a streaming <code>RegimeFilter</code>, and opt-in <code>gate_band</code> and <code>transition_floor</code>. This is a daily model with no market-data or order path, so it is not a low-latency system.</div>
+  <div class="honest"><strong>What the latest review found.</strong> The code is careful: no lookahead was found, EM converged on all 24 refits, and 40 random starts found nothing better. The research claim did not survive: the gate adds no edge over a free volatility rule, its daily moves lift carry turnover from 0.25 to 18.4 a year, and its break-even cost on the bundled path is 2.8 bp. The bundled seed is also unrepresentative, with a 1.49 unfiltered Sharpe against a 0.35 average across seeds. One weakness stays in the default configuration: a single extreme print can capture the calm state and halve the gate; the opt-in <code>calm_guard</code> detects this and keeps the mean gate within 0.04 of clean. The review added the evaluation harness, CI for all four languages, a streaming <code>RegimeFilter</code>, and opt-in <code>gate_band</code> and <code>transition_floor</code>. This is a daily model with no market-data or order path, so it is not a low-latency system.</div>
 
   <h2>What's inside</h2>
   <div class="grid">
@@ -80,7 +80,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <div class="card"><h3>Data &amp; pipeline</h3>
       <p><code>data/</code> holds 2000 trading days generated from a true 3-state regime model (calm-bull / choppy / crisis): the market index, 6 futures-like trend assets, 6 synthetic currencies with spot returns and rate differentials, the generator's true state path for teaching comparison, and a pinned <code>config.json</code>. <code>pipeline.py</code> runs model selection, the fit, the six strategy variants and attribution end to end; <code>generate_data.py</code> rewrites CSVs and goldens byte-for-byte reproducibly.</p></div>
     <div class="card"><h3>Golden suite &amp; testing</h3>
-      <p>Five mirrored layers per language: ground truth by enumeration, mathematical properties (monotone EM, stochastic rows, stationarity, chained <code>forward_step</code> equals the full pass, costs never help, the accounting identity, the no-lookahead shift), the 21-case / 77-scalar golden file with baked-in sign and semantic invariants (crisis momentum return &lt; 0, filtered combined Sharpe higher and drawdown shallower, re-rank panel flips at day 21), edge cases, and robustness (dead state, zero-likelihood data, malformed warm starts). C++ parses the JSON with a hand-rolled reader, Rust with serde_json, Java with a bundled parser.</p></div>
+      <p>Five mirrored layers per language: ground truth by enumeration, mathematical properties (monotone EM, stochastic rows, stationarity, chained <code>forward_step</code> equals the full pass, costs never help, the accounting identity, the no-lookahead shift), the 22-case / 77-scalar golden file with baked-in sign and semantic invariants (crisis momentum return &lt; 0, filtered combined Sharpe higher and drawdown shallower, re-rank panel flips at day 21), edge cases, and robustness (dead state, zero-likelihood data, malformed warm starts). C++ parses the JSON with a hand-rolled reader, Rust with serde_json, Java with a bundled parser.</p></div>
     <div class="card"><h3>Validation &amp; error contract</h3>
       <p>Same rules and error family everywhere — <code>ValueError</code>, <code>std::invalid_argument</code>, <code>Err(RegimeError::InvalidInput)</code>, <code>IllegalArgumentException</code>: empty inputs, NaN/inf, K/D and positions/returns/dates shape mismatches, non-stochastic parameters, returns ≤ −1, negative costs, <code>K &lt; 2</code>, <code>T ≤ K</code>, thresholds outside [0, 1], labels outside [0, K), duplicated or unsorted dates. Rust never panics on library input; Java never throws <code>ArrayIndexOutOfBoundsException</code> from a public method.</p></div>
     <div class="card"><h3>Units, timing, scope</h3>
@@ -116,28 +116,28 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 # Python reference (3.11, numpy &gt;= 1.24, pandas &gt;= 2.0, pytest)
 cd python
 PYTHONPATH=src python3 demo.py          # end-to-end demo
-PYTHONPATH=src python3 -m pytest -q     # test suite (112 tests)
+PYTHONPATH=src python3 -m pytest -q     # test suite (118 tests)
 cd ..
 
 # C++ (C++17, CMake &gt;= 3.20, GoogleTest)
 cd cpp
 bash build.sh                           # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j2
 ./build/demo                            # demo
-ctest --test-dir build --output-on-failure   # tests (GoogleTest, 86 tests in one binary)
+ctest --test-dir build --output-on-failure   # tests (GoogleTest, 90 tests in one binary)
 cd ..
 
 # Rust (edition 2021)
 cd rust
 cargo build --release                   # zero warnings
 cargo run --release --bin demo          # demo
-cargo test --release                    # 87 integration tests
+cargo test --release                    # 91 integration tests
 cd ..
 
 # Java (21, JUnit 4 + Hamcrest — no Maven/Gradle)
 cd java
 bash build.sh                           # javac -Xlint:all -Werror into out/
 bash demo.sh                            # demo main
-bash test.sh                            # JUnitCore on all *Test classes (86 tests)
+bash test.sh                            # JUnitCore on all *Test classes (90 tests)
 cd ..
 
 # cookbook snippets, after the three native builds (60 snippets)

@@ -52,7 +52,7 @@ fixtures draw their own seeded inputs).
 | Wipe-out guard, returns > -1, strictly increasing dates | yes | yes | yes | yes |
 | Crisis-state attribution table | yes | yes | yes | yes |
 | Gate evaluation: baselines, block bootstrap, seed sweep | yes | no | no | no |
-| Golden-value test suite (21 cases / 80 scalars from `data/golden/golden.json`) | yes | yes | yes | yes |
+| Golden-value test suite (22 cases / 83 scalars from `data/golden/golden.json`) | yes | yes | yes | yes |
 
 ## Directory layout
 
@@ -77,7 +77,7 @@ regime-aware-trading/
     true_states.csv        <- generator regime path (teaching comparison only)
     config.json            <- pinned strategy/backtest configuration
     generate_data.py       <- seeded generator (numpy default_rng(83)); rewrites CSVs + golden
-    golden/golden.json     <- 21 cross-language golden cases (80 scalars)
+    golden/golden.json     <- 22 cross-language golden cases (83 scalars)
   python/
     src/regime/            <- reference implementation (hmm, strategies, backtest, pipeline, evaluation)
     tests/                 <- pytest suite
@@ -108,7 +108,7 @@ executable bit does not matter.
 ```bash
 cd python
 PYTHONPATH=src python3 demo.py          # end-to-end demo
-PYTHONPATH=src python3 -m pytest -q     # test suite (112 tests)
+PYTHONPATH=src python3 -m pytest -q     # test suite (118 tests)
 ```
 
 ### C++
@@ -117,7 +117,7 @@ PYTHONPATH=src python3 -m pytest -q     # test suite (112 tests)
 cd cpp
 bash build.sh                           # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2
 ./build/demo                            # demo
-ctest --test-dir build --output-on-failure   # tests (GoogleTest, 86 tests in one binary)
+ctest --test-dir build --output-on-failure   # tests (GoogleTest, 90 tests in one binary)
 ```
 
 ### Rust
@@ -126,7 +126,7 @@ ctest --test-dir build --output-on-failure   # tests (GoogleTest, 86 tests in on
 cd rust
 cargo build --release                   # zero warnings
 cargo run --release --bin demo          # demo
-cargo test --release                    # 87 integration tests
+cargo test --release                    # 91 integration tests
 ```
 
 ### Java
@@ -135,7 +135,7 @@ cargo test --release                    # 87 integration tests
 cd java
 bash build.sh                           # javac -Xlint:all -Werror into out/
 bash demo.sh                            # demo main
-bash test.sh                            # JUnitCore on all *Test classes (86 tests)
+bash test.sh                            # JUnitCore on all *Test classes (90 tests)
 ```
 
 ### Cookbook snippets
@@ -202,7 +202,7 @@ cases instead. Sharpe ratios are raw (no risk-free rate subtracted).
 
 ## Golden-value cross-language testing
 
-`data/golden/golden.json` holds 21 named cases (80 scalars) — HMM
+`data/golden/golden.json` holds 22 named cases (83 scalars) — HMM
 log-likelihoods, fitted K=3 means/stds/transition matrix, exact Viterbi
 state counts, stationary distribution, smoothed probabilities at pinned
 dates, all seven backtest metrics (ann-return, ann-vol, Sharpe, maxDD,
@@ -227,8 +227,8 @@ cross-language drift is a real bug, not noise: a port that diverges beyond
 contract. Regenerate data and golden values with
 `python3 data/generate_data.py` (seeded; CSVs reproduce byte for byte, golden values to about 1e-11 across numpy versions).
 
-Test counts: Python 112 (pytest), C++ 86 (GoogleTest), Rust 87
-(cargo integration tests), Java 86 (JUnit 4); plus 60 compiled-and-run
+Test counts: Python 118 (pytest), C++ 90 (GoogleTest), Rust 91
+(cargo integration tests), Java 90 (JUnit 4); plus 60 compiled-and-run
 COOKBOOK snippets and the four demos.
 
 ## Real-world usage notes
@@ -275,10 +275,14 @@ What a practitioner gets, precisely:
   `leverage_cap > 0`, `1 <= top_n, bottom_n` with `top_n + bottom_n <= A`,
   `rebalance_days >= 1`, `train_min_days > n_states`, `refit_days >= 1`,
   `cost_bps >= 0` (no upper sanity bound), `0 <= gate_threshold <= 1`.
-* **Known weakness.** One corrupt print can capture the lowest-variance
-  state: injecting a single -30 % or +50 % return took the mean gate from
-  0.60 to 0.28 with every fit still reporting `converged`. Clean outliers
-  before fitting.
+* **Known weakness, with an opt-in guard.** One corrupt print can capture
+  the lowest-variance state: injecting a single -30 % or +50 % return took
+  the mean gate from 0.60 to 0.28 with every fit still reporting
+  `converged`, and this is still the default behaviour. Setting
+  `calm_guard = 0.01` detects the collapse, refits on a clipped window and
+  records the day in `guard_trips`; the same injections then give 0.62 and
+  0.64 (API_SPEC 3.3). The mean stays slightly high and days near the shock
+  still differ, so clean outliers before fitting all the same.
 * **Deliberately out of scope.** Missing-data handling (a NaN is
   rejected, not filled), market impact or bid/ask asymmetry, position
   limits, financing, FX quote conventions, non-Gaussian emissions,
@@ -288,7 +292,7 @@ What a practitioner gets, precisely:
   re-identified by lowest variance at every refit instead).
 * **What is verified.** Enumerated ground truth for the forward pass,
   smoothing and Viterbi; EM monotonicity; cross-language golden agreement
-  to 1e-6..1e-8 on 80 scalars; the no-lookahead shift test; the
+  to 1e-6..1e-8 on 83 scalars; the no-lookahead shift test; the
   robustness cases listed in `docs/ARCHITECTURE.md` section 6. The
   bundled data are synthetic and generated *from* a 3-state model, so the
   94.85 % decoding accuracy and the Sharpe improvements are a best case

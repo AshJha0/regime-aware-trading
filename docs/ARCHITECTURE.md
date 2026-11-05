@@ -59,7 +59,7 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>21 cross-language cases, 80 scalars"]
+    BT --> OUT["demo report / golden.json<br/>22 cross-language cases, 83 scalars"]
     COMB --> OUT
     CRISIS --> OUT
     OUT --> EVAL["tools/evaluate_gate.py<br/>baselines, bootstrap, seed sweep<br/>docs/GATE_EVALUATION.md"]
@@ -252,7 +252,9 @@ sequenceDiagram
   window changes little in 63 days) and keeps state identities stable
   across refits; the calm state is nevertheless re-identified per model by
   `argmin variance` rather than trusted by label — walk-forward fits can
-  reorganize.
+  reorganize. The opt-in `calm_guard` (API_SPEC 3.3) adds a stationary-weight
+  check to that choice, because the raw argmin can land on a state holding
+  one outlier.
 * **Stationary distribution by power method** (pinned) rather than an
   eigen-solver: three lines, no linear-algebra dependency in the native
   ports, tolerance 1e-13 with a 10000-iteration cap, and the result is
@@ -306,7 +308,7 @@ Four layers, mirrored in each language:
    grid-style property test that better-matched parameters score higher
    likelihoods; costs never help (property over a cost grid);
    the accounting identity; and the one-day-shift no-lookahead test.
-3. **Golden values.** All 21 cases / 80 scalars in
+3. **Golden values.** All 22 cases / 83 scalars in
    `data/golden/golden.json` — HMM fit results at 1e-6/1e-5,
    probabilities at 1e-8, all seven strategy metrics at 1e-8, Viterbi
    counts exact, and the synthetic `carry_rerank_*` panel (positions
@@ -319,7 +321,7 @@ Four layers, mirrored in each language:
    with serde_json, Java with a small bundled parser), rebuilds the
    re-rank panel from the case's `inputs`, and must run the full pinned
    config for golden comparisons; the assertion on the scalar count is
-   exact (80).
+   exact (83).
 4. **Edge cases.** K=1 rejected; variance floor engages when K exceeds
    distinct data support; short series rejected; carry tie-break by
    index; rebalance window longer than the sample keeps the day-0 book;
@@ -345,7 +347,7 @@ Four layers, mirrored in each language:
    failing refit names its day; NaN gates rejected; wipe-out day named
    and `max_dd >= -1` on accepted input; `compute_metrics` validates its
    own dates; duplicated, unsorted and malformed dates rejected and
-   sorted non-contiguous months compound as calendar months; the 21-day
+   sorted non-contiguous months compound as calendar months; the 22-day
    block fallback drops the trailing partial block; `A = 0` assets
    rejected; non-positive equity rejected by `max_drawdown`; state labels
    outside `[0, K)` and `K < 1` rejected; walk-forward overrides
@@ -447,7 +449,7 @@ system; here is where each piece plugs in and what has to be replaced.
    model (impact, bid/ask, financing) before quoting numbers externally.
 5. **Cross-language deployment.** The reference is Python; the C++/Rust/
    Java ports are for hosting the model inside a C++, Rust or JVM stack
-   and are held to the same 80 golden scalars, the same validation rules
+   and are held to the same 83 golden scalars, the same validation rules
    and the same error family. A port that is modified locally should be
    re-run against `data/golden/golden.json` and
    `tools/check_cookbook.py` before use.
