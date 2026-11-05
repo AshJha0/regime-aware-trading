@@ -48,6 +48,8 @@ struct PipelineConfig {
     double gate_threshold{0.5};
     double cost_bps{5.0};
     int trading_days{252};
+    double gate_band{0.0};         ///< Optional key; absent means 0 (off).
+    double transition_floor{0.0};  ///< Optional key; absent means 0 (off).
 };
 
 /// Bundled market data.
@@ -84,6 +86,17 @@ struct PipelineResult {
     std::map<std::string, CombinedResult> combined;     ///< "unfiltered", "filtered".
     std::map<std::string, std::vector<StateStats>> crisis;  ///< Per-strategy state table.
 };
+
+/// The `gate_band_0p3` golden scalars (API_SPEC 5).
+struct GateBandValues {
+    double mean_turnover_momentum{0.0};  ///< Mean daily turnover, filtered momentum.
+    double mean_turnover_carry{0.0};     ///< Mean daily turnover, filtered carry.
+    double sharpe_combined{0.0};         ///< Full-sample Sharpe of the 50/50 book.
+};
+
+/// Filtered backtests with the pipeline's gate banded by \p band.  The band
+/// only post-processes the gate, so no refit is needed.
+GateBandValues gate_band_values(const PipelineResult& pipe, double band);
 
 /// Load the bundled CSVs and config from \p data_dir.
 /// \throws std::invalid_argument if files are missing or lengths disagree.

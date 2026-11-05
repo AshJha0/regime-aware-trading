@@ -232,6 +232,8 @@ pub struct GaussianHmm {
     pub max_iter: usize,
     /// Lower bound applied to every variance after each update.
     pub var_floor: f64,
+    /// Added to each warm-start transition entry before EM (0 is off).
+    pub transition_floor: f64,
     params: Option<HmmParams>,
     fit_result: Option<HmmFitResult>,
 }
@@ -252,7 +254,27 @@ impl GaussianHmm {
                 "tol and var_floor must be > 0 and max_iter >= 1".into(),
             ));
         }
-        Ok(GaussianHmm { n_states, tol, max_iter, var_floor, params: None, fit_result: None })
+        Ok(GaussianHmm {
+            n_states,
+            tol,
+            max_iter,
+            var_floor,
+            transition_floor: 0.0,
+            params: None,
+            fit_result: None,
+        })
+    }
+
+    /// Set the warm-start transition floor (API_SPEC 1.3).  It is added to
+    /// each transition entry of a warm-start `init` before EM, rows
+    /// renormalised; a cold start ignores it.
+    ///
+    /// # Errors
+    /// `floor` negative or non-finite.
+    pub fn with_transition_floor(mut self, floor: f64) -> Result<Self> {
+        validate_transition_floor(floor)?;
+        self.transition_floor = floor;
+        Ok(self)
     }
 
     /// Create a model with the pinned defaults `tol = 1e-8`, `max_iter = 500`,
@@ -631,7 +653,9 @@ impl GaussianHmm {
         let mut params = match init {
             Some(p) => {
                 validate_params(p, k, d_dim)?;
-                p.clone()
+                let mut warm = p.clone();
+                warm.transmat = apply_transition_floor(&warm.transmat, self.transition_floor)?;
+                warm
             }
             None => self.pinned_init(x)?,
         };
@@ -807,27 +831,8 @@ pub fn forward_step(params: &HmmParams, alpha_prev: &[f64], x_t: &[f64]) -> Resu
     let k = params.startprob.len();
     let d_dim = params.means.cols();
     validate_params(params, k, d_dim)?;
-    if alpha_prev.len() != k {
-        return Err(RegimeError::InvalidInput(format!(
-            "alpha_prev length {} does not match n_states={k}",
-            alpha_prev.len()
-        )));
-    }
-    let asum: f64 = alpha_prev.iter().sum();
-    if alpha_prev.iter().any(|&v| !v.is_finite() || v < 0.0) || (asum - 1.0).abs() > STOCHASTIC_TOL {
-        return Err(RegimeError::InvalidInput(
-            "alpha_prev must be finite, non-negative and sum to 1".into(),
-        ));
-    }
-    if x_t.len() != d_dim {
-        return Err(RegimeError::InvalidInput(format!(
-            "observation length {} does not match D={d_dim}",
-            x_t.len()
-        )));
-    }
-    if x_t.iter().any(|v| !v.is_finite()) {
-        return Err(RegimeError::InvalidInput("observation contains NaN or inf".into()));
-    }
+    validate_alpha(alpha_prev, k)?;
+    validate_observation(x_t, d_dim)?;
     let mut logb = vec![0.0; k];
     for (i, lb) in logb.iter_mut().enumerate() {
         let mut acc = 0.0;
@@ -857,4 +862,215 @@ pub fn forward_step(params: &HmmParams, alpha_prev: &[f64], x_t: &[f64]) -> Resu
         *v /= total;
     }
     Ok(a)
+}
+
+fn validate_transition_floor(floor: f64) -> Result<()> {
+    if !floor.is_finite() || floor < 0.0 {
+        return Err(RegimeError::InvalidInput(format!(
+            "transition_floor must be finite and >= 0, got {floor}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_alpha(alpha: &[f64], k: usize) -> Result<()> {
+    if alpha.len() != k {
+        return Err(RegimeError::InvalidInput(format!(
+            "alpha_prev length {} does not match n_states={k}",
+            alpha.len()
+        )));
+    }
+    let asum: f64 = alpha.iter().sum();
+    if alpha.iter().any(|&v| !v.is_finite() || v < 0.0) || (asum - 1.0).abs() > STOCHASTIC_TOL {
+        return Err(RegimeError::InvalidInput(
+            "alpha_prev must be finite, non-negative and sum to 1".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observation(x: &[f64], d_dim: usize) -> Result<()> {
+    if x.len() != d_dim {
+        return Err(RegimeError::InvalidInput(format!(
+            "observation length {} does not match D={d_dim}",
+            x.len()
+        )));
+    }
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(RegimeError::InvalidInput("observation contains NaN or inf".into()));
+    }
+    Ok(())
+}
+
+/// Add `floor` to every transition entry and renormalise the rows (API_SPEC
+/// 1.3): EM multiplies the old `A_ij` into the new one, so an entry at or
+/// near zero can never recover.  `floor == 0` returns an exact copy.
+///
+/// # Errors
+/// `floor` negative or non-finite.
+pub fn apply_transition_floor(transmat: &Matrix, floor: f64) -> Result<Matrix> {
+    validate_transition_floor(floor)?;
+    let mut out = transmat.clone();
+    if floor == 0.0 {
+        return Ok(out);
+    }
+    for i in 0..out.rows() {
+        let row = out.row_mut(i);
+        let mut sum = 0.0;
+        for v in row.iter_mut() {
+            *v += floor;
+            sum += *v;
+        }
+        for v in row.iter_mut() {
+            *v /= sum;
+        }
+    }
+    Ok(out)
+}
+
+/// Streaming filter: [`forward_step`] with the set-up paid once (API_SPEC
+/// 1.10).
+///
+/// [`RegimeFilter::new`] validates and copies the parameters, precomputes
+/// the log-variance terms and sizes every buffer; [`RegimeFilter::update`]
+/// then checks only the observation and allocates nothing (except to build
+/// an error).  Without `alpha_prev` the first update applies `startprob`
+/// with no transition, so a run over a series reproduces
+/// [`GaussianHmm::filtered_probabilities`].
+#[derive(Debug, Clone)]
+pub struct RegimeFilter {
+    k: usize,
+    d: usize,
+    startprob: Vec<f64>,
+    transmat: Matrix,
+    means: Matrix,
+    variances: Matrix,
+    log_const: Vec<f64>,
+    logb: Vec<f64>,
+    next: Vec<f64>,
+    alpha: Vec<f64>,
+    started: bool,
+}
+
+impl RegimeFilter {
+    /// Build a filter; with `alpha_prev` the first update equals
+    /// `forward_step(params, alpha_prev, x)`.
+    ///
+    /// # Errors
+    /// Invalid `params` ([`validate_params`]) or `alpha_prev`.
+    pub fn new(params: &HmmParams, alpha_prev: Option<&[f64]>) -> Result<Self> {
+        let k = params.startprob.len();
+        let d = params.means.cols();
+        validate_params(params, k, d)?;
+        if d < 1 {
+            return Err(RegimeError::InvalidInput("means must have at least one dimension".into()));
+        }
+        let log_const = (0..k)
+            .map(|i| {
+                let mut acc = 0.0;
+                for dim in 0..d {
+                    acc += LOG_2PI + params.variances.get(i, dim).ln();
+                }
+                acc
+            })
+            .collect();
+        let mut filter = RegimeFilter {
+            k,
+            d,
+            startprob: params.startprob.clone(),
+            transmat: params.transmat.clone(),
+            means: params.means.clone(),
+            variances: params.variances.clone(),
+            log_const,
+            logb: vec![0.0; k],
+            next: vec![0.0; k],
+            alpha: params.startprob.clone(),
+            started: false,
+        };
+        filter.reset(alpha_prev)?;
+        Ok(filter)
+    }
+
+    /// Restart, from `alpha_prev` when given.
+    ///
+    /// # Errors
+    /// `alpha_prev` is not a length-`K` probability vector; the filter is
+    /// then unchanged.
+    pub fn reset(&mut self, alpha_prev: Option<&[f64]>) -> Result<()> {
+        match alpha_prev {
+            Some(a) => {
+                validate_alpha(a, self.k)?;
+                self.alpha.copy_from_slice(a);
+                self.started = true;
+            }
+            None => {
+                self.alpha.copy_from_slice(&self.startprob);
+                self.started = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance one observation and return `P(s_t | x_1..t)`.
+    ///
+    /// # Errors
+    /// `x` is not length `D` and finite, or has zero likelihood under every
+    /// reachable state; the filter is then unchanged.
+    pub fn update(&mut self, x: &[f64]) -> Result<&[f64]> {
+        validate_observation(x, self.d)?;
+        let mut mx = f64::NEG_INFINITY;
+        for i in 0..self.k {
+            let mut acc = self.log_const[i];
+            for dim in 0..self.d {
+                let diff = x[dim] - self.means.get(i, dim);
+                acc += diff * diff / self.variances.get(i, dim);
+            }
+            self.logb[i] = -0.5 * acc;
+            mx = mx.max(self.logb[i]);
+        }
+        let mut total = 0.0;
+        for j in 0..self.k {
+            let mut prior = self.alpha[j];
+            if self.started {
+                prior = 0.0;
+                for i in 0..self.k {
+                    prior += self.alpha[i] * self.transmat.get(i, j);
+                }
+            }
+            self.next[j] = prior * (self.logb[j] - mx).exp();
+            total += self.next[j];
+        }
+        if !(total > 0.0) {
+            return Err(RegimeError::InvalidInput(
+                "forward step: the observation has zero likelihood under every reachable state"
+                    .into(),
+            ));
+        }
+        for v in self.next.iter_mut() {
+            *v /= total;
+        }
+        std::mem::swap(&mut self.alpha, &mut self.next);
+        self.started = true;
+        Ok(&self.alpha)
+    }
+
+    /// Current filtered posterior (`startprob` before any update).
+    pub fn alpha(&self) -> &[f64] {
+        &self.alpha
+    }
+
+    /// True once there is a filtered posterior to transition from.
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Number of states `K`.
+    pub fn n_states(&self) -> usize {
+        self.k
+    }
+
+    /// Observation dimension `D`.
+    pub fn n_dims(&self) -> usize {
+        self.d
+    }
 }

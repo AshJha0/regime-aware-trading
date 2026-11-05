@@ -295,6 +295,63 @@ public final class Strategies {
      */
     public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
             int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor) {
+        return regimeGate(indexReturns, nStates, trainMinDays, refitDays, mode, threshold, tol,
+                maxIter, varFloor, 0.0, 0.0);
+    }
+
+    /**
+     * No-trade band on a gate series (API_SPEC 3.3):
+     * {@code o[t] = g[t]} if {@code |g[t] - o[t-1]| > band} else {@code o[t-1]},
+     * with {@code o[-1] = 1}. Causal; a band of 0 returns the gate unchanged.
+     *
+     * @param gate gate values, length T
+     * @param band band width in [0, 1]
+     * @return the banded gate, a new array
+     * @throws IllegalArgumentException if band is outside [0, 1] or gate is not finite
+     */
+    public static double[] applyGateBand(double[] gate, double band) {
+        if (!(band >= 0.0 && band <= 1.0)) {
+            throw new IllegalArgumentException("gate_band must be in [0, 1], got " + band);
+        }
+        if (gate == null) {
+            throw new IllegalArgumentException("gate must not be null");
+        }
+        double[] out = new double[gate.length];
+        double held = 1.0;
+        for (int t = 0; t < gate.length; t++) {
+            if (!Double.isFinite(gate[t])) {
+                throw new IllegalArgumentException("gate contains NaN or inf");
+            }
+            if (Math.abs(gate[t] - held) > band) {
+                held = gate[t];
+            }
+            out[t] = held;
+        }
+        return out;
+    }
+
+    /**
+     * The regime gate with the optional settings of API_SPEC 3.3.
+     *
+     * @param indexReturns market proxy daily returns, length T
+     * @param nStates HMM state count K
+     * @param trainMinDays observations required before the first fit
+     * @param refitDays trading days between refits
+     * @param mode "prob" or "binary"
+     * @param threshold probability threshold for the binary gate
+     * @param tol EM convergence tolerance
+     * @param maxIter EM iteration cap
+     * @param varFloor EM variance floor
+     * @param gateBand no-trade band in [0, 1] ({@link #applyGateBand}); 0 is off
+     * @param transitionFloor warm-start floor for the refits; 0 is off
+     * @return gate values and the fitted models in refit order
+     * @throws IllegalArgumentException as the short form, plus a return
+     *     &lt;= -100% (the message names the day), gateBand outside [0, 1] or
+     *     an invalid transitionFloor
+     */
+    public static GateResult regimeGate(double[] indexReturns, int nStates, int trainMinDays,
+            int refitDays, String mode, double threshold, double tol, int maxIter, double varFloor,
+            double gateBand, double transitionFloor) {
         if (indexReturns == null) {
             throw new IllegalArgumentException("index_returns must be 1-D");
         }
@@ -303,14 +360,23 @@ public final class Strategies {
                 throw new IllegalArgumentException("index_returns contain NaN or inf");
             }
         }
+        for (int t = 0; t < indexReturns.length; t++) {
+            if (indexReturns[t] <= -1.0) {
+                throw new IllegalArgumentException("index_returns contain a return <= -100% at t=" + t
+                        + " (" + indexReturns[t] + ")");
+            }
+        }
         if (!"prob".equals(mode) && !"binary".equals(mode)) {
             throw new IllegalArgumentException("gate mode must be 'prob' or 'binary', got '" + mode + "'");
         }
         if (!(threshold >= 0.0 && threshold <= 1.0)) {
             throw new IllegalArgumentException("gate threshold must be in [0, 1], got " + threshold);
         }
-        // Validates nStates >= 2, tol/varFloor > 0, maxIter >= 1 up front.
-        new GaussianHmm(nStates, tol, maxIter, varFloor);
+        if (!(gateBand >= 0.0 && gateBand <= 1.0)) {
+            throw new IllegalArgumentException("gate_band must be in [0, 1], got " + gateBand);
+        }
+        // Validates nStates >= 2, tol/varFloor > 0, maxIter >= 1, the floor up front.
+        new GaussianHmm(nStates, tol, maxIter, varFloor, transitionFloor);
         int t2 = indexReturns.length;
         if (trainMinDays <= nStates || refitDays < 1) {
             throw new IllegalArgumentException(
@@ -329,7 +395,7 @@ public final class Strategies {
         int calmState = 0;
         for (int t = t0; t < t2; t++) {
             if ((t - t0) % refitDays == 0) {
-                model = new GaussianHmm(nStates, tol, maxIter, varFloor);
+                model = new GaussianHmm(nStates, tol, maxIter, varFloor, transitionFloor);
                 HmmParams warm = models.isEmpty() ? null : models.get(models.size() - 1).params().copy();
                 double[] window = Arrays.copyOfRange(indexReturns, 0, t + 1);
                 try {
@@ -352,7 +418,7 @@ public final class Strategies {
             double pCalm = alpha[calmState];
             gate[t] = "prob".equals(mode) ? pCalm : (pCalm >= threshold ? 1.0 : 0.0);
         }
-        return new GateResult(gate, models);
+        return new GateResult(applyGateBand(gate, gateBand), models);
     }
 
     /** Pinned gate-state rule: lowest variance on dimension 0, ties to the lower label. */

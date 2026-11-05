@@ -5,3 +5,6 @@ java/out/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# local agent worktrees
+.claude/

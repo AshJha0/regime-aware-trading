@@ -28,7 +28,7 @@ import pandas as pd
 
 from .backtest import BacktestResult, compute_metrics, run_backtest, state_conditional_returns
 from .hmm import GaussianHMM
-from .strategies import apply_gate, carry_positions, carry_total_returns, momentum_positions, regime_gate
+from .strategies import apply_gate, apply_gate_band, carry_positions, carry_total_returns, momentum_positions, regime_gate
 
 
 @dataclass
@@ -63,6 +63,8 @@ CONFIG_INT_KEYS = (
 CONFIG_FLOAT_KEYS = (
     "em_tol", "var_floor", "vol_target", "ewma_lambda", "leverage_cap", "gate_threshold", "cost_bps",
 )
+#: Optional keys (API_SPEC 4): absent means 0, which is off.
+CONFIG_OPTIONAL_FLOAT_KEYS = ("gate_band", "transition_floor")
 
 
 def _validate_config(config: Dict) -> None:
@@ -75,6 +77,11 @@ def _validate_config(config: Dict) -> None:
         v = config.get(key)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v):
             raise ValueError(f"config.json key '{key}' must be a finite number, got {v!r}")
+    for key in CONFIG_OPTIONAL_FLOAT_KEYS:
+        if key in config:
+            v = config[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v):
+                raise ValueError(f"config.json key '{key}' must be a finite number, got {v!r}")
     if not isinstance(config.get("gate_mode"), str):
         raise ValueError("config.json key 'gate_mode' must be a string")
 
@@ -175,6 +182,8 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
         tol=cfg["em_tol"],
         max_iter=cfg["em_max_iter"],
         var_floor=cfg["var_floor"],
+        gate_band=cfg.get("gate_band", 0.0),
+        transition_floor=cfg.get("transition_floor", 0.0),
     )
 
     cost = cfg["cost_bps"]
@@ -317,6 +326,16 @@ def golden_cases(pipe: Dict) -> List[Dict]:
             "tol": 1e-8,
         }
     )
+
+    # Exploratory no-trade band: pins the mechanism, not a recommended value.
+    cases.append(
+        {
+            "name": "gate_band_0p3",
+            "inputs": dict(GATE_BAND_INPUTS),
+            "expect": gate_band_values(pipe, GATE_BAND_INPUTS["gate_band"]),
+            "tol": 1e-8,
+        }
+    )
     return cases
 
 
@@ -348,6 +367,43 @@ CARRY_RERANK_POSITION_KEYS = (
     "pos_day42_asset3",
 )
 CARRY_RERANK_BACKTEST_KEYS = ("ann_return", "sharpe", "max_dd")
+
+#: Band of the `gate_band_0p3` golden case (API_SPEC 5).  It was picked by
+#: looking at this sample, so it is a regression pin and not a default.
+GATE_BAND_INPUTS: Dict = {"gate_band": 0.3}
+
+
+def gate_band_values(pipe: Dict, band: float) -> Dict[str, float]:
+    """Filtered backtests with the pipeline's gate banded by ``band``.
+
+    The band only post-processes the gate, so no refit is needed.  Returns
+    the `gate_band_0p3` scalars: mean daily turnover of each filtered leg
+    and the full-sample Sharpe of the 50/50 combined portfolio.
+    """
+    ds, cfg = pipe["dataset"], pipe["config"]
+    gate = apply_gate_band(pipe["gate"], band)
+    mom_pos = momentum_positions(
+        ds.trend_returns,
+        lookback=cfg["momentum_lookback"],
+        vol_target=cfg["vol_target"],
+        ewma_lambda=cfg["ewma_lambda"],
+        leverage_cap=cfg["leverage_cap"],
+    )
+    carry_pos = carry_positions(
+        ds.fx_rate_diffs,
+        top_n=cfg["carry_top_n"],
+        bottom_n=cfg["carry_bottom_n"],
+        rebalance_days=cfg["rebalance_days"],
+    )
+    carry_rets = carry_total_returns(ds.fx_spot_returns, ds.fx_rate_diffs)
+    mom = run_backtest(apply_gate(mom_pos, gate), ds.trend_returns, cfg["cost_bps"], ds.dates)
+    carry = run_backtest(apply_gate(carry_pos, gate), carry_rets, cfg["cost_bps"], ds.dates)
+    net = 0.5 * mom.net_returns + 0.5 * carry.net_returns
+    return {
+        "mean_turnover_momentum": float(np.mean(mom.turnover)),
+        "mean_turnover_carry": float(np.mean(carry.turnover)),
+        "sharpe_combined": float(compute_metrics(net, ds.dates)["sharpe"]),
+    }
 
 
 def carry_rerank_panel(inputs: Dict) -> np.ndarray:
