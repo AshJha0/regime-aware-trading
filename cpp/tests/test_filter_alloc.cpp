@@ -22,8 +22,14 @@ void* operator new(std::size_t n) {
     if (void* p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
+// Nothrow new must be replaced too: its memory is released by the delete below.
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+    ++g_news;
+    return std::malloc(n ? n : 1);
+}
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
 
 TEST(RegimeFilter, UpdateDoesNotAllocate) {
     regime::GaussianHMM m(3);
