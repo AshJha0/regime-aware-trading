@@ -349,3 +349,29 @@ TEST(RegimeGate, TransitionFloorZeroIsBitwiseDefault) {
         regime::regime_gate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 1e-6);
     for (double g : floored.gate) EXPECT_TRUE(g >= 0.0 && g <= 1.0);
 }
+
+// --- calm-state guard (API_SPEC 3.3) ---------------------------------------
+
+TEST(CalmGuard, WinsorizeByHand) {
+    const std::vector<double> got = regime::winsorize_mad({0.0, 1.0, 2.0, 3.0, 100.0}, 2.0);
+    const std::vector<double> want{0.0, 1.0, 2.0, 3.0, 2.0 + 2.0 * 1.4826};
+    EXPECT_EQ(got, want);
+}
+
+TEST(CalmGuard, WinsorizeZeroScaleIsUnchanged) {
+    const std::vector<double> x{1.0, 1.0, 1.0, 9.0};
+    EXPECT_EQ(regime::winsorize_mad(x), x);
+}
+
+TEST(CalmGuard, SelectSkipsThinStatesAndFallsBack) {
+    const std::vector<double> v{1.0, 2.0, 3.0};
+    EXPECT_EQ(regime::select_calm_state(v, {0.001, 0.7, 0.299}, 0.01), 1u);
+    EXPECT_EQ(regime::select_calm_state(v, {0.3, 0.3, 0.4}, 0.5), 2u);
+}
+
+TEST(CalmGuard, RangeIsChecked) {
+    const std::vector<double> r(10, 0.0);
+    for (double bad : {-0.1, 1.0})
+        EXPECT_THROW(regime::regime_gate(r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 0.0, bad),
+                     std::invalid_argument);
+}

@@ -28,7 +28,14 @@ import pandas as pd
 
 from .backtest import BacktestResult, compute_metrics, run_backtest, state_conditional_returns
 from .hmm import GaussianHMM
-from .strategies import apply_gate, apply_gate_band, carry_positions, carry_total_returns, momentum_positions, regime_gate
+from .strategies import (
+    apply_gate,
+    apply_gate_band,
+    carry_positions,
+    carry_total_returns,
+    momentum_positions,
+    regime_gate_report,
+)
 
 
 @dataclass
@@ -64,7 +71,7 @@ CONFIG_FLOAT_KEYS = (
     "em_tol", "var_floor", "vol_target", "ewma_lambda", "leverage_cap", "gate_threshold", "cost_bps",
 )
 #: Optional keys (API_SPEC 4): absent means 0, which is off.
-CONFIG_OPTIONAL_FLOAT_KEYS = ("gate_band", "transition_floor")
+CONFIG_OPTIONAL_FLOAT_KEYS = ("gate_band", "transition_floor", "calm_guard")
 
 
 def _validate_config(config: Dict) -> None:
@@ -172,7 +179,7 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
     viterbi_accuracy = float(np.mean(viterbi3 == mapped_true))
 
     # Walk-forward regime gate on the index (no lookahead).
-    gate, gate_models = regime_gate(
+    gate_report = regime_gate_report(
         r_idx,
         n_states=K,
         train_min_days=cfg["train_min_days"],
@@ -184,7 +191,9 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
         var_floor=cfg["var_floor"],
         gate_band=cfg.get("gate_band", 0.0),
         transition_floor=cfg.get("transition_floor", 0.0),
+        calm_guard=cfg.get("calm_guard", 0.0),
     )
+    gate, gate_models = gate_report.gate, gate_report.models
 
     cost = cfg["cost_bps"]
     dates = ds.dates
@@ -238,6 +247,7 @@ def run_full_pipeline(data_dir: str | Path, refit_days: int | None = None, train
         "viterbi_accuracy": viterbi_accuracy,
         "gate": gate,
         "gate_models": gate_models,
+        "guard_trips": gate_report.guard_trips,
         "results": results,
         "combined": combined,
         "crisis": crisis,
@@ -336,6 +346,16 @@ def golden_cases(pipe: Dict) -> List[Dict]:
             "tol": 1e-8,
         }
     )
+
+    # One injected print with the calm-state guard on (API_SPEC 3.3).
+    cases.append(
+        {
+            "name": "calm_guard_injected",
+            "inputs": dict(CALM_GUARD_INPUTS),
+            "expect": calm_guard_values(pipe, CALM_GUARD_INPUTS),
+            "tol": 1e-6,
+        }
+    )
     return cases
 
 
@@ -371,6 +391,38 @@ CARRY_RERANK_BACKTEST_KEYS = ("ann_return", "sharpe", "max_dd")
 #: Band of the `gate_band_0p3` golden case (API_SPEC 5).  It was picked by
 #: looking at this sample, so it is a regression pin and not a default.
 GATE_BAND_INPUTS: Dict = {"gate_band": 0.3}
+
+
+#: Inputs of the `calm_guard_injected` golden case (API_SPEC 5).
+CALM_GUARD_INPUTS: Dict = {"calm_guard": 0.01, "inject_t": 1000, "inject_return": -0.3}
+
+
+def calm_guard_values(pipe: Dict, inputs: Dict) -> Dict[str, float]:
+    """Gate with one return replaced and the calm-state guard on.
+
+    Returns the `calm_guard_injected` scalars: the mean gate from the first
+    fit on, the number of trips and the first trip day (-1 if none).
+    """
+    ds, cfg = pipe["dataset"], pipe["config"]
+    r = ds.index_returns.copy()
+    r[inputs["inject_t"]] = inputs["inject_return"]
+    report = regime_gate_report(
+        r,
+        n_states=cfg["n_states"],
+        train_min_days=cfg["train_min_days"],
+        refit_days=cfg["refit_days"],
+        mode=cfg["gate_mode"],
+        threshold=cfg["gate_threshold"],
+        tol=cfg["em_tol"],
+        max_iter=cfg["em_max_iter"],
+        var_floor=cfg["var_floor"],
+        calm_guard=inputs["calm_guard"],
+    )
+    return {
+        "mean_gate": float(np.mean(report.gate[cfg["train_min_days"] - 1:])),
+        "trip_count": float(len(report.guard_trips)),
+        "first_trip_day": float(report.guard_trips[0]) if report.guard_trips else -1.0,
+    }
 
 
 def gate_band_values(pipe: Dict, band: float) -> Dict[str, float]:

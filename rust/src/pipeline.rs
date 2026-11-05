@@ -27,7 +27,7 @@ use crate::hmm::{GaussianHmm, HmmFitResult};
 use crate::matrix::Matrix;
 use crate::strategies::{
     apply_gate, apply_gate_band, carry_positions, carry_total_returns, momentum_positions,
-    regime_gate_with, GateOptions,
+    regime_gate_report, GateOptions,
 };
 
 /// Pinned strategy/backtest configuration (`data/config.json`).
@@ -73,6 +73,9 @@ pub struct Config {
     /// Optional warm-start transition floor; absent means 0 (off).
     #[serde(default)]
     pub transition_floor: f64,
+    /// Optional calm-state guard weight; absent means 0 (off).
+    #[serde(default)]
+    pub calm_guard: f64,
 }
 
 /// Bundled market data.
@@ -147,6 +150,8 @@ pub struct PipelineOutput {
     pub gate: Vec<f64>,
     /// Number of walk-forward refits.
     pub n_gate_models: usize,
+    /// Refit days on which the calm-state guard tripped.
+    pub guard_trips: Vec<usize>,
     /// Momentum backtest, unfiltered.
     pub momentum_unfiltered: BacktestResult,
     /// Momentum backtest, regime-filtered.
@@ -330,7 +335,7 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let viterbi_accuracy = hits as f64 / dataset.true_states.len() as f64;
 
     // Walk-forward regime gate on the index (no lookahead).
-    let (gate, gate_models) = regime_gate_with(
+    let gate_report = regime_gate_report(
         &dataset.index_returns,
         k,
         cfg.train_min_days,
@@ -340,8 +345,14 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
         cfg.em_tol,
         cfg.em_max_iter,
         cfg.var_floor,
-        GateOptions { gate_band: cfg.gate_band, transition_floor: cfg.transition_floor },
+        GateOptions {
+            gate_band: cfg.gate_band,
+            transition_floor: cfg.transition_floor,
+            calm_guard: cfg.calm_guard,
+        },
     )?;
+    let guard_trips = gate_report.guard_trips;
+    let (gate, gate_models) = (gate_report.gate, gate_report.models);
 
     let cost = cfg.cost_bps;
     let dates = Some(dataset.dates.as_slice());
@@ -406,6 +417,7 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
         viterbi_accuracy,
         gate,
         n_gate_models: gate_models.len(),
+        guard_trips,
         momentum_unfiltered,
         momentum_filtered,
         carry_unfiltered,
@@ -434,6 +446,45 @@ fn argmax(xs: &[f64]) -> usize {
         }
     }
     best
+}
+
+/// Gate with `r[inject_t]` replaced and the calm-state guard on: the
+/// `calm_guard_injected` golden scalars (API_SPEC 5).
+///
+/// # Errors
+/// `inject_t` out of range, or a failing gate run.
+pub fn calm_guard_values(
+    pipe: &PipelineOutput,
+    calm_guard: f64,
+    inject_t: usize,
+    inject_return: f64,
+) -> Result<BTreeMap<String, f64>> {
+    let cfg = &pipe.config;
+    let mut r = pipe.dataset.index_returns.clone();
+    *r.get_mut(inject_t)
+        .ok_or_else(|| RegimeError::InvalidInput(format!("inject_t out of range: {inject_t}")))? =
+        inject_return;
+    let report = regime_gate_report(
+        &r,
+        cfg.n_states,
+        cfg.train_min_days,
+        cfg.refit_days,
+        &cfg.gate_mode,
+        cfg.gate_threshold,
+        cfg.em_tol,
+        cfg.em_max_iter,
+        cfg.var_floor,
+        GateOptions { calm_guard, ..GateOptions::default() },
+    )?;
+    let tail = &report.gate[cfg.train_min_days - 1..];
+    let mut out = BTreeMap::new();
+    out.insert("mean_gate".to_string(), tail.iter().sum::<f64>() / tail.len() as f64);
+    out.insert("trip_count".to_string(), report.guard_trips.len() as f64);
+    out.insert(
+        "first_trip_day".to_string(),
+        report.guard_trips.first().map_or(-1.0, |&t| t as f64),
+    );
+    Ok(out)
 }
 
 /// Filtered backtests with the pipeline's gate banded by `band`: the

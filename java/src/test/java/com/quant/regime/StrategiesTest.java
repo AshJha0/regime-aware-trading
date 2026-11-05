@@ -410,4 +410,37 @@ public class StrategiesTest {
             assertTrue(g >= 0.0 && g <= 1.0);
         }
     }
+
+    // --- calm-state guard (API_SPEC 3.3) ---
+
+    @Test
+    public void winsorizeByHand() {
+        assertArrayEquals(new double[] {0.0, 1.0, 2.0, 3.0, 2.0 + 2.0 * 1.4826},
+                Strategies.winsorizeMad(new double[] {0.0, 1.0, 2.0, 3.0, 100.0}, 2.0), 0.0);
+    }
+
+    @Test
+    public void winsorizeZeroScaleIsUnchanged() {
+        double[] x = {1.0, 1.0, 1.0, 9.0};
+        assertArrayEquals(x, Strategies.winsorizeMad(x, Strategies.CALM_CLIP_MADS), 0.0);
+    }
+
+    @Test
+    public void selectSkipsThinStatesAndFallsBack() {
+        double[] v = {1.0, 2.0, 3.0};
+        assertEquals(1, Strategies.selectCalmState(v, new double[] {0.001, 0.7, 0.299}, 0.01));
+        assertEquals(2, Strategies.selectCalmState(v, new double[] {0.3, 0.3, 0.4}, 0.5));
+    }
+
+    @Test
+    public void calmGuardRangeIsChecked() {
+        for (double bad : new double[] {-0.1, 1.0}) {
+            try {
+                Strategies.regimeGate(new double[10], 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 0.0, bad);
+                org.junit.Assert.fail("expected a range error");
+            } catch (IllegalArgumentException e) {
+                assertTrue(e.getMessage().contains("calm_guard"));
+            }
+        }
+    }
 }

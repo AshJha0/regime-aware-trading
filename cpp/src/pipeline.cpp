@@ -113,6 +113,8 @@ PipelineConfig load_config(const std::string& path) {
         c.gate_band = json_number(text, "gate_band");
     if (text.find("\"transition_floor\"") != std::string::npos)
         c.transition_floor = json_number(text, "transition_floor");
+    if (text.find("\"calm_guard\"") != std::string::npos)
+        c.calm_guard = json_number(text, "calm_guard");
     return c;
 }
 
@@ -176,6 +178,25 @@ Dataset load_dataset(const std::string& data_dir) {
 
     ds.config = load_config(data_dir + "/config.json");
     return ds;
+}
+
+CalmGuardValues calm_guard_values(const PipelineResult& pipe, double calm_guard,
+                                  std::size_t inject_t, double inject_return) {
+    const PipelineConfig& cfg = pipe.config;
+    std::vector<double> r = pipe.dataset.index_returns;
+    r.at(inject_t) = inject_return;
+    const RegimeGateResult res =
+        regime_gate(r, cfg.n_states, cfg.train_min_days, cfg.refit_days, cfg.gate_mode,
+                    cfg.gate_threshold, cfg.em_tol, cfg.em_max_iter, cfg.var_floor, 0.0, 0.0,
+                    calm_guard);
+    const std::size_t start = static_cast<std::size_t>(cfg.train_min_days) - 1;
+    double sum = 0.0;
+    for (std::size_t t = start; t < res.gate.size(); ++t) sum += res.gate[t];
+    CalmGuardValues out;
+    out.mean_gate = sum / static_cast<double>(res.gate.size() - start);
+    out.trip_count = static_cast<double>(res.guard_trips.size());
+    if (!res.guard_trips.empty()) out.first_trip_day = static_cast<double>(res.guard_trips[0]);
+    return out;
 }
 
 GateBandValues gate_band_values(const PipelineResult& pipe, double band) {
@@ -250,7 +271,7 @@ PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int>
     RegimeGateResult gate_res =
         regime_gate(ds.index_returns, K, cfg.train_min_days, cfg.refit_days, cfg.gate_mode,
                     cfg.gate_threshold, cfg.em_tol, cfg.em_max_iter, cfg.var_floor,
-                    cfg.gate_band, cfg.transition_floor);
+                    cfg.gate_band, cfg.transition_floor, cfg.calm_guard);
 
     const double cost = cfg.cost_bps;
 
@@ -263,7 +284,7 @@ PipelineResult run_full_pipeline(const std::string& data_dir, std::optional<int>
     PipelineResult pipe{
         std::move(ds), cfg, std::move(hmm2), std::move(hmm3), fit2, fit3,
         std::move(viterbi3), std::move(smoothed3), std::move(stationary3),
-        viterbi_accuracy, std::move(gate_res.gate), {}, {}, {}};
+        viterbi_accuracy, std::move(gate_res.gate), std::move(gate_res.guard_trips), {}, {}, {}};
 
     const std::vector<std::string>* dates = &pipe.dataset.dates;
     pipe.results["momentum_unfiltered"] = run_backtest(mom_pos, pipe.dataset.trend_returns, cost, dates);

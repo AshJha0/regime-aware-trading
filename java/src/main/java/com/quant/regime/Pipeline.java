@@ -55,12 +55,13 @@ public final class Pipeline {
      * @param tradingDays trading days per year
      * @param gateBand optional no-trade band; absent means 0 (off)
      * @param transitionFloor optional warm-start floor; absent means 0 (off)
+     * @param calmGuard optional calm-state guard weight; absent means 0 (off)
      */
     public record Config(int nStates, double emTol, int emMaxIter, double varFloor,
             int momentumLookback, double volTarget, double ewmaLambda, double leverageCap,
             int carryTopN, int carryBottomN, int rebalanceDays, int trainMinDays, int refitDays,
             String gateMode, double gateThreshold, double costBps, int tradingDays,
-            double gateBand, double transitionFloor) {
+            double gateBand, double transitionFloor, double calmGuard) {
     }
 
     /**
@@ -94,6 +95,7 @@ public final class Pipeline {
      *     volatility-mapped true state (teaching value)
      * @param gate walk-forward gate values, length T
      * @param gateModels fitted gate models in refit order
+     * @param guardTrips refit days on which the calm-state guard tripped
      * @param results backtests keyed momentum/carry x unfiltered/filtered
      * @param combinedNet 50/50 combined net returns keyed unfiltered/filtered
      * @param combinedMetrics metrics of the combined portfolios
@@ -102,7 +104,7 @@ public final class Pipeline {
     public record Result(Dataset dataset, Config config,
             GaussianHmm hmm2, HmmFitResult fit2, GaussianHmm hmm3, HmmFitResult fit3,
             int[] viterbi3, double[][] smoothed3, double[] stationary3, double viterbiAccuracy,
-            double[] gate, List<GaussianHmm> gateModels,
+            double[] gate, List<GaussianHmm> gateModels, int[] guardTrips,
             Map<String, Backtest.Result> results,
             Map<String, double[]> combinedNet, Map<String, Backtest.Metrics> combinedMetrics,
             Map<String, Backtest.StateStats[]> crisis) {
@@ -164,7 +166,8 @@ public final class Pipeline {
                 cfgInt(cfg, "train_min_days"), cfgInt(cfg, "refit_days"),
                 (String) cfg.get("gate_mode"), cfgDouble(cfg, "gate_threshold"),
                 cfgDouble(cfg, "cost_bps"), cfgInt(cfg, "trading_days"),
-                cfgOptional(cfg, "gate_band"), cfgOptional(cfg, "transition_floor"));
+                cfgOptional(cfg, "gate_band"), cfgOptional(cfg, "transition_floor"),
+                cfgOptional(cfg, "calm_guard"));
         return new Dataset(dates, indexReturns, trendReturns, spot, diffs, trueStates, config);
     }
 
@@ -197,7 +200,7 @@ public final class Pipeline {
                 trainMinDays != null ? trainMinDays : base.trainMinDays(),
                 refitDays != null ? refitDays : base.refitDays(),
                 base.gateMode(), base.gateThreshold(), base.costBps(), base.tradingDays(),
-                base.gateBand(), base.transitionFloor());
+                base.gateBand(), base.transitionFloor(), base.calmGuard());
         double[] rIdx = ds.indexReturns();
         int k = cfg.nStates();
 
@@ -237,7 +240,7 @@ public final class Pipeline {
         // Walk-forward regime gate on the index (no lookahead).
         Strategies.GateResult gr = Strategies.regimeGate(rIdx, k, cfg.trainMinDays(), cfg.refitDays(),
                 cfg.gateMode(), cfg.gateThreshold(), cfg.emTol(), cfg.emMaxIter(), cfg.varFloor(),
-                cfg.gateBand(), cfg.transitionFloor());
+                cfg.gateBand(), cfg.transitionFloor(), cfg.calmGuard());
 
         double cost = cfg.costBps();
         LocalDate[] dates = ds.dates();
@@ -284,7 +287,7 @@ public final class Pipeline {
         }
 
         return new Result(ds, cfg, hmm2, fit2, hmm3, fit3, viterbi3, smoothed3, stationary3,
-                viterbiAccuracy, gr.gate(), gr.models(), results, combinedNet, combinedMetrics, crisis);
+                viterbiAccuracy, gr.gate(), gr.models(), gr.guardTrips(), results, combinedNet, combinedMetrics, crisis);
     }
 
     // ------------------------------------------------------------------ //
@@ -351,6 +354,31 @@ public final class Pipeline {
     /** Optional numeric config value (API_SPEC 4): absent means 0, which is off. */
     private static double cfgOptional(Map<?, ?> cfg, String key) {
         return cfg.containsKey(key) ? cfgDouble(cfg, key) : 0.0;
+    }
+
+    /**
+     * Gate with {@code r[injectT]} replaced and the calm-state guard on.
+     *
+     * @return the {@code calm_guard_injected} golden scalars (API_SPEC 5)
+     */
+    public static Map<String, Double> calmGuardValues(Result pipe, double calmGuard, int injectT,
+            double injectReturn) {
+        Config cfg = pipe.config();
+        double[] r = pipe.dataset().indexReturns().clone();
+        r[injectT] = injectReturn;
+        Strategies.GateResult gr = Strategies.regimeGate(r, cfg.nStates(), cfg.trainMinDays(),
+                cfg.refitDays(), cfg.gateMode(), cfg.gateThreshold(), cfg.emTol(), cfg.emMaxIter(),
+                cfg.varFloor(), 0.0, 0.0, calmGuard);
+        double sum = 0.0;
+        int start = cfg.trainMinDays() - 1;
+        for (int t = start; t < gr.gate().length; t++) {
+            sum += gr.gate()[t];
+        }
+        Map<String, Double> out = new LinkedHashMap<>();
+        out.put("mean_gate", sum / (gr.gate().length - start));
+        out.put("trip_count", (double) gr.guardTrips().length);
+        out.put("first_trip_day", gr.guardTrips().length > 0 ? (double) gr.guardTrips()[0] : -1.0);
+        return out;
     }
 
     /**

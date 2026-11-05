@@ -550,7 +550,10 @@ through day $t$**:
   identical math, no recomputation, no peeking.
 * $k^\*$ is the **lowest-variance** state, not the highest-mean one:
   walk-forward fits occasionally isolate a tiny high-mean state, while
-  the low-vol state is robustly "the calm one."
+  the low-vol state is robustly "the calm one." The exception is a state
+  that holds a single extreme return: its variance collapses to the floor
+  and it wins the argmin. The opt-in `calm_guard` catches this by checking
+  how much stationary weight the state has (API_SPEC 3.3).
 * Before the first fit, the gate is 1 (no filtering).
 
 `gate_mode` is `"prob"` (position scaled continuously by the probability)

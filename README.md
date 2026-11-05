@@ -49,7 +49,7 @@ fixtures draw their own seeded inputs).
 | Backtest engine (pinned accounting, costs on turnover, full metrics) | yes | yes | yes | yes |
 | Wipe-out guard, returns > -1, strictly increasing dates | yes | yes | yes | yes |
 | Crisis-state attribution table | yes | yes | yes | yes |
-| Golden-value test suite (21 cases / 80 scalars from `data/golden/golden.json`) | yes | yes | yes | yes |
+| Golden-value test suite (22 cases / 83 scalars from `data/golden/golden.json`) | yes | yes | yes | yes |
 
 ## Directory layout
 
@@ -71,7 +71,7 @@ regime-aware-trading/
     true_states.csv        <- generator regime path (teaching comparison only)
     config.json            <- pinned strategy/backtest configuration
     generate_data.py       <- seeded generator (numpy default_rng(83)); rewrites CSVs + golden
-    golden/golden.json     <- 21 cross-language golden cases (80 scalars)
+    golden/golden.json     <- 22 cross-language golden cases (83 scalars)
   python/
     src/regime/            <- reference implementation (hmm, strategies, backtest, pipeline)
     tests/                 <- pytest suite
@@ -194,7 +194,7 @@ cases instead. Sharpe ratios are raw (no risk-free rate subtracted).
 
 ## Golden-value cross-language testing
 
-`data/golden/golden.json` holds 21 named cases (80 scalars) — HMM
+`data/golden/golden.json` holds 22 named cases (83 scalars) — HMM
 log-likelihoods, fitted K=3 means/stds/transition matrix, exact Viterbi
 state counts, stationary distribution, smoothed probabilities at pinned
 dates, all seven backtest metrics (ann-return, ann-vol, Sharpe, maxDD,
@@ -267,10 +267,14 @@ What a practitioner gets, precisely:
   `leverage_cap > 0`, `1 <= top_n, bottom_n` with `top_n + bottom_n <= A`,
   `rebalance_days >= 1`, `train_min_days > n_states`, `refit_days >= 1`,
   `cost_bps >= 0` (no upper sanity bound), `0 <= gate_threshold <= 1`.
-* **Known weakness.** One corrupt print can capture the lowest-variance
-  state: injecting a single -30 % or +50 % return took the mean gate from
-  0.60 to 0.28 with every fit still reporting `converged`. Clean outliers
-  before fitting.
+* **Known weakness, with an opt-in guard.** One corrupt print can capture
+  the lowest-variance state: injecting a single -30 % or +50 % return took
+  the mean gate from 0.60 to 0.28 with every fit still reporting
+  `converged`, and this is still the default behaviour. Setting
+  `calm_guard = 0.01` detects the collapse, refits on a clipped window and
+  records the day in `guard_trips`; the same injections then give 0.62 and
+  0.64 (API_SPEC 3.3). The mean stays slightly high and days near the shock
+  still differ, so clean outliers before fitting all the same.
 * **Deliberately out of scope.** Missing-data handling (a NaN is
   rejected, not filled), market impact or bid/ask asymmetry, position
   limits, financing, FX quote conventions, non-Gaussian emissions,
@@ -280,7 +284,7 @@ What a practitioner gets, precisely:
   re-identified by lowest variance at every refit instead).
 * **What is verified.** Enumerated ground truth for the forward pass,
   smoothing and Viterbi; EM monotonicity; cross-language golden agreement
-  to 1e-6..1e-8 on 80 scalars; the no-lookahead shift test; the
+  to 1e-6..1e-8 on 83 scalars; the no-lookahead shift test; the
   robustness cases listed in `docs/ARCHITECTURE.md` section 6. The
   bundled data are synthetic and generated *from* a 3-state model, so the
   94.85 % decoding accuracy and the Sharpe improvements are a best case
