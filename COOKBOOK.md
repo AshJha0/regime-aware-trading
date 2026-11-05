@@ -759,7 +759,7 @@ System.out.printf("crisis: %d days, ann ret %+.5f%n",
 ## 12. How do I verify my build against the golden values?
 
 Every language ships a golden test suite that compares all 20 cases /
-77 scalars (`python -m pytest tests/test_golden.py`, the `Golden.*`
+80 scalars (`python -m pytest tests/test_golden.py`, the `Golden.*`
 GoogleTest cases, `cargo test --test golden_tests`, `GoldenTest`). This is
 the manual equivalent for one pinned number: the full-sample K=3
 log-likelihood `6886.449836599692` (tolerance 1e-6). Python reads the

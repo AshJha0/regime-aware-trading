@@ -55,7 +55,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
   <h2>Measured, not claimed</h2>
   <div class="numbers"><table>
     <tr><td>Cross-language parity</td><td>python 74 · cpp 69 · rust 70 · java 70 tests — 283 green, plus 56 compiled-and-run COOKBOOK snippets and the four demos</td></tr>
-    <tr><td>Golden suite</td><td>20 named cases / 77 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
+    <tr><td>Golden suite</td><td>21 named cases / 80 scalars in <code>golden.json</code>; every suite asserts the exact scalar count. HMM fits at 1e-6/1e-5, probabilities 1e-8, all seven backtest metrics 1e-8, Viterbi state counts exact (<code>tol = 0</code>)</td></tr>
     <tr><td>Ground truth</td><td>forward likelihood, smoothed marginals and the Viterbi path checked against brute-force sums over all 8 paths of a K = 2, T = 3 model (1e-12); EM monotone on the bundled index; transition rows sum to 1 (1e-12); <code>pi P = pi</code> (1e-10)</td></tr>
     <tr><td>Determinism</td><td>no RNG in library code (only the seeded generator, numpy <code>default_rng(83)</code>); pinned Hyndman-Fan-7 quantile initialisation, iteration order and tie-breaks; two fits are bitwise identical; any cross-language drift is a bug, not noise</td></tr>
     <tr><td>No lookahead</td><td>P[t] decided at the close of day t from data through t, earns r[t+1]; the walk-forward gate uses filtered (causal) probabilities under a model fitted on r[0..t], refit every 63 days on an expanding window; a one-day-shift test enforces it</td></tr>

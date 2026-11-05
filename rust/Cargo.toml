@@ -11,3 +11,10 @@ serde_json = "1"
 [dev-dependencies]
 rand = "0.8"
 rand_distr = "0.4"
+
+# Numerical code: `!(x > 0.0)` is deliberate because it also rejects NaN, and
+# indexed loops walk parallel arrays in the summation order pinned by API_SPEC.
+[lints.clippy]
+neg_cmp_op_on_partial_ord = "allow"
+needless_range_loop = "allow"
+manual_is_multiple_of = "allow"

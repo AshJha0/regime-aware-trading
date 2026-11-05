@@ -645,6 +645,11 @@ re-read the past under future parameters.
   *generated from* a 3-state model; real data will never reward the HMM
   this cleanly (94.85% decoding accuracy is a best case, not an
   expectation).
+* **Measured evidence.** `docs/GATE_EVALUATION.md` tests the gate against
+  constant-exposure and volatility baselines over simulated seeds. It does
+  not beat a 21-day volatility rule on average, and it loses to the
+  unfiltered book under fat tails. Treat figures in this guide as worked
+  examples, not evidence of an edge.
 * **Costs and capacity.** The filter trades every day (the gate wiggles);
   in `"prob"` mode this is modest, but with expensive instruments the
   extra turnover eats the benefit. Golden turnover values exist precisely
