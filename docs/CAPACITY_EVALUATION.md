@@ -13,48 +13,48 @@ Cost per instrument per day, from `regime.costs`: `half_spread * |dw| * AUM + Y 
 | Half spread | 1 bps | 0.5 bps | Illustrative, not calibrated |
 | ADV | $5bn | $20bn | Illustrative, not calibrated |
 | Y | 1 | 1 | Illustrative, not calibrated |
-| Daily sigma (mean) | 1.26% | 0.60% | Measured on the synthetic window |
+| Daily sigma (mean) | 1.23% | 0.64% | Measured on the synthetic window |
 
 
 Window t >= 504. AUM is fixed, and each day's trade fills in that day, so carry rebalances pay for one large print. The square-root form is a general rule of thumb. Where peak participation passes 100% of ADV the formula is outside anything it could describe, and those rows are a warning, not a forecast. The halving search runs to $100bn, past the table, so a halving figure above $10bn is an extrapolation of the formula and nothing more.
 
 ## Unfiltered
 
-Gross Sharpe 1.55, gross return 6.45%, turnover 4.6 per year.
+Gross Sharpe 0.71, gross return 7.48%, turnover 36.8 per year.
 
 | AUM | Net Sharpe | Net return | Cost per year | Peak participation |
 |---|---|---|---|---|
-| $1m | 1.53 | 6.39% | 0.06% | 0.00% |
-| $3m | 1.53 | 6.38% | 0.07% | 0.01% |
-| $10m | 1.52 | 6.36% | 0.09% | 0.03% |
-| $30m | 1.51 | 6.32% | 0.13% | 0.09% |
-| $100m | 1.50 | 6.25% | 0.20% | 0.29% |
-| $300m | 1.47 | 6.14% | 0.31% | 0.87% |
-| $1bn | 1.41 | 5.92% | 0.54% | 2.91% |
-| $3bn | 1.33 | 5.56% | 0.90% | 8.74% |
-| $10bn | 1.16 | 4.85% | 1.60% | 29.12% |
+| $1m | 0.67 | 7.10% | 0.38% | 0.01% |
+| $3m | 0.67 | 7.02% | 0.46% | 0.03% |
+| $10m | 0.65 | 6.86% | 0.61% | 0.10% |
+| $30m | 0.63 | 6.61% | 0.87% | 0.30% |
+| $100m | 0.58 | 6.11% | 1.36% | 0.99% |
+| $300m | 0.50 | 5.31% | 2.16% | 2.97% |
+| $1bn | 0.35 | 3.75% | 3.73% | 9.91% |
+| $3bn | 0.11 | 1.21% | 6.26% | 29.73% |
+| $10bn | -0.35 | -3.74% | 11.22% | 99.09% |
 
 
-Net Sharpe halves from its $1m value at: **$41.4bn**.
+Net Sharpe halves from its $1m value at: **$1.11bn**.
 
 ## HMM gate
 
-Gross Sharpe 1.72, gross return 4.18%, turnover 17.7 per year.
+Gross Sharpe 1.52, gross return 10.71%, turnover 73.9 per year.
 
 | AUM | Net Sharpe | Net return | Cost per year | Peak participation |
 |---|---|---|---|---|
-| $1m | 1.66 | 4.04% | 0.14% | 0.00% |
-| $3m | 1.66 | 4.03% | 0.16% | 0.01% |
-| $10m | 1.64 | 3.99% | 0.19% | 0.03% |
-| $30m | 1.62 | 3.94% | 0.24% | 0.09% |
-| $100m | 1.58 | 3.84% | 0.35% | 0.29% |
-| $300m | 1.51 | 3.67% | 0.51% | 0.86% |
-| $1bn | 1.37 | 3.34% | 0.84% | 2.88% |
-| $3bn | 1.15 | 2.81% | 1.37% | 8.64% |
-| $10bn | 0.72 | 1.77% | 2.41% | 28.79% |
+| $1m | 1.43 | 10.08% | 0.63% | 0.01% |
+| $3m | 1.41 | 9.97% | 0.75% | 0.03% |
+| $10m | 1.38 | 9.74% | 0.97% | 0.09% |
+| $30m | 1.33 | 9.39% | 1.32% | 0.28% |
+| $100m | 1.23 | 8.69% | 2.02% | 0.92% |
+| $300m | 1.07 | 7.56% | 3.15% | 2.75% |
+| $1bn | 0.75 | 5.35% | 5.36% | 9.17% |
+| $3bn | 0.25 | 1.77% | 8.94% | 27.50% |
+| $10bn | -0.71 | -5.21% | 15.93% | 91.68% |
 
 
-Net Sharpe halves from its $1m value at: **$7.78bn**.
+Net Sharpe halves from its $1m value at: **$1.11bn**.
 
 ## Sensitivity
 
@@ -64,16 +64,16 @@ AUM at which net Sharpe halves, with Y and ADV scaled around the illustrative va
 
 |  | ADV x 0.1 | ADV x 1 | ADV x 10 |
 |---|---|---|---|
-| Y x 0.5 | $16.6bn | above $100bn | above $100bn |
-| Y x 1 | $4.19bn | $41.4bn | above $100bn |
-| Y x 2 | $1.06bn | $10.4bn | above $100bn |
+| Y x 0.5 | $452m | $4.37bn | $43.3bn |
+| Y x 1 | $118m | $1.11bn | $10.9bn |
+| Y x 2 | $32.4m | $286m | $2.74bn |
 
 
 ### HMM gate
 
 |  | ADV x 0.1 | ADV x 1 | ADV x 10 |
 |---|---|---|---|
-| Y x 0.5 | $3.13bn | $30.9bn | above $100bn |
-| Y x 1 | $797m | $7.78bn | $77.2bn |
-| Y x 2 | $206m | $1.97bn | $19.4bn |
+| Y x 0.5 | $454m | $4.39bn | $43.5bn |
+| Y x 1 | $119m | $1.11bn | $10.9bn |
+| Y x 2 | $32.5m | $287m | $2.76bn |
 
