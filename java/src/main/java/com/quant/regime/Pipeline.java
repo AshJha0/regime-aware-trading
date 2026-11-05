@@ -53,11 +53,14 @@ public final class Pipeline {
      * @param gateThreshold binary-gate probability threshold
      * @param costBps one-way transaction cost in bps of turnover
      * @param tradingDays trading days per year
+     * @param gateBand optional no-trade band; absent means 0 (off)
+     * @param transitionFloor optional warm-start floor; absent means 0 (off)
      */
     public record Config(int nStates, double emTol, int emMaxIter, double varFloor,
             int momentumLookback, double volTarget, double ewmaLambda, double leverageCap,
             int carryTopN, int carryBottomN, int rebalanceDays, int trainMinDays, int refitDays,
-            String gateMode, double gateThreshold, double costBps, int tradingDays) {
+            String gateMode, double gateThreshold, double costBps, int tradingDays,
+            double gateBand, double transitionFloor) {
     }
 
     /**
@@ -160,7 +163,8 @@ public final class Pipeline {
                 cfgInt(cfg, "carry_bottom_n"), cfgInt(cfg, "rebalance_days"),
                 cfgInt(cfg, "train_min_days"), cfgInt(cfg, "refit_days"),
                 (String) cfg.get("gate_mode"), cfgDouble(cfg, "gate_threshold"),
-                cfgDouble(cfg, "cost_bps"), cfgInt(cfg, "trading_days"));
+                cfgDouble(cfg, "cost_bps"), cfgInt(cfg, "trading_days"),
+                cfgOptional(cfg, "gate_band"), cfgOptional(cfg, "transition_floor"));
         return new Dataset(dates, indexReturns, trendReturns, spot, diffs, trueStates, config);
     }
 
@@ -192,7 +196,8 @@ public final class Pipeline {
                 base.carryTopN(), base.carryBottomN(), base.rebalanceDays(),
                 trainMinDays != null ? trainMinDays : base.trainMinDays(),
                 refitDays != null ? refitDays : base.refitDays(),
-                base.gateMode(), base.gateThreshold(), base.costBps(), base.tradingDays());
+                base.gateMode(), base.gateThreshold(), base.costBps(), base.tradingDays(),
+                base.gateBand(), base.transitionFloor());
         double[] rIdx = ds.indexReturns();
         int k = cfg.nStates();
 
@@ -231,7 +236,8 @@ public final class Pipeline {
 
         // Walk-forward regime gate on the index (no lookahead).
         Strategies.GateResult gr = Strategies.regimeGate(rIdx, k, cfg.trainMinDays(), cfg.refitDays(),
-                cfg.gateMode(), cfg.gateThreshold(), cfg.emTol(), cfg.emMaxIter(), cfg.varFloor());
+                cfg.gateMode(), cfg.gateThreshold(), cfg.emTol(), cfg.emMaxIter(), cfg.varFloor(),
+                cfg.gateBand(), cfg.transitionFloor());
 
         double cost = cfg.costBps();
         LocalDate[] dates = ds.dates();
@@ -340,6 +346,51 @@ public final class Pipeline {
             }
         }
         return out;
+    }
+
+    /** Optional numeric config value (API_SPEC 4): absent means 0, which is off. */
+    private static double cfgOptional(Map<?, ?> cfg, String key) {
+        return cfg.containsKey(key) ? cfgDouble(cfg, key) : 0.0;
+    }
+
+    /**
+     * Filtered backtests with the pipeline's gate banded by {@code band}. The
+     * band only post-processes the gate, so no refit is needed.
+     *
+     * @param pipe a full pipeline run
+     * @param band band width in [0, 1]
+     * @return the {@code gate_band_0p3} golden scalars (API_SPEC 5)
+     */
+    public static Map<String, Double> gateBandValues(Result pipe, double band) {
+        Dataset ds = pipe.dataset();
+        Config cfg = pipe.config();
+        double[] gate = Strategies.applyGateBand(pipe.gate(), band);
+        double[][] momPos = Strategies.momentumPositions(ds.trendReturns(), cfg.momentumLookback(),
+                cfg.volTarget(), cfg.ewmaLambda(), cfg.leverageCap());
+        double[][] carryPos = Strategies.carryPositions(ds.fxRateDiffs(), cfg.carryTopN(),
+                cfg.carryBottomN(), cfg.rebalanceDays());
+        double[][] carryRets = Strategies.carryTotalReturns(ds.fxSpotReturns(), ds.fxRateDiffs());
+        Backtest.Result mom = Backtest.run(Strategies.applyGate(momPos, gate), ds.trendReturns(),
+                cfg.costBps(), ds.dates());
+        Backtest.Result carry = Backtest.run(Strategies.applyGate(carryPos, gate), carryRets,
+                cfg.costBps(), ds.dates());
+        double[] net = new double[mom.netReturns().length];
+        for (int t = 0; t < net.length; t++) {
+            net[t] = 0.5 * mom.netReturns()[t] + 0.5 * carry.netReturns()[t];
+        }
+        Map<String, Double> out = new LinkedHashMap<>();
+        out.put("mean_turnover_momentum", mean(mom.turnover()));
+        out.put("mean_turnover_carry", mean(carry.turnover()));
+        out.put("sharpe_combined", Backtest.computeMetrics(net, ds.dates()).sharpe());
+        return out;
+    }
+
+    private static double mean(double[] v) {
+        double s = 0.0;
+        for (double x : v) {
+            s += x;
+        }
+        return s / v.length;
     }
 
     private static double cfgDouble(Map<?, ?> cfg, String key) {

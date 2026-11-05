@@ -382,6 +382,30 @@ the golden file.
   order left-to-right over time inside a pass. Reordered reductions
   (e.g. pairwise/BLAS-tree sums over *time*) can drift past golden
   tolerances after 500 EM iterations.
+* **Filter update, measured.** `forward_step` validates every parameter
+  and allocates on each call; `RegimeFilter` (API_SPEC 1.10) does that work
+  once. `cpp/src/bench_filter.cpp` and `rust/src/bin/bench_filter.rs` time
+  each call on the bundled returns, K = 3, D = 1, 2,000,000 calls after
+  100,000 of warm-up. Machine: Intel Core 5 120U laptop, 10 cores, 12
+  threads, 16 GB, no core pinning, not otherwise isolated. C++: g++ 15.2
+  `-O3` in WSL2 Ubuntu. Rust: rustc 1.99.1 `--release` on Windows 11.
+  Ranges are across five C++ and three Rust runs, in ns, and include the
+  fenced TSC timer's own cost (p50 14 to 22 ns):
+
+  | routine | p50 | p99 | p99.9 | max |
+  |---|---|---|---|---|
+  | C++ `forward_step` | 90 to 202 | 254 to 331 | 367 to 495 | 311,000 to 1,058,000 |
+  | C++ `RegimeFilter::update` | 51 to 95 | 113 to 165 | 166 to 243 | 133,000 to 757,000 |
+  | Rust `forward_step` | 172 to 178 | 393 to 493 | 645 to 766 | 225,000 to 3,963,000 |
+  | Rust `RegimeFilter::update` | 70 | 103 to 140 | 164 to 188 | 178,000 to 259,000 |
+
+  A sixth and seventh C++ run, back to back with no pause, had the timer
+  floor itself triple and `update` p50 near 170 ns; the laptop's clock
+  varies under load, so read these as rough sizes. The maxima are operating
+  system interruptions, and the filter does not remove them. All of this
+  times one arithmetic routine on warm caches. The model is daily-frequency:
+  no market-data, order or network path exists in this repository, so
+  nothing here is a claim about trading latency.
 
 ## 8. How a desk would use this
 
@@ -415,8 +439,8 @@ system; here is where each piece plugs in and what has to be replaced.
    `worst_month` means the same thing in every port. Replace the cost
    model (impact, bid/ask, financing) before quoting numbers externally.
 5. **Cross-language deployment.** The reference is Python; the C++/Rust/
-   Java ports are for a latency-sensitive or JVM/Rust-hosted environment
-   and are held to the same 77 golden scalars, the same validation rules
+   Java ports are for hosting the model inside a C++, Rust or JVM stack
+   and are held to the same 80 golden scalars, the same validation rules
    and the same error family. A port that is modified locally should be
    re-run against `data/golden/golden.json` and
    `tools/check_cookbook.py` before use.

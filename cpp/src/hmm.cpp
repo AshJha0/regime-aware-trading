@@ -186,13 +186,55 @@ void validate_params(const HMMParams& p, std::size_t n_states, std::size_t n_dim
     }
 }
 
-GaussianHMM::GaussianHMM(int n_states, double tol, int max_iter, double var_floor)
-    : n_states_(n_states), tol_(tol), max_iter_(max_iter), var_floor_(var_floor) {
+namespace {
+
+void validate_transition_floor(double floor) {
+    if (!std::isfinite(floor) || floor < 0.0)
+        throw std::invalid_argument("transition_floor must be finite and >= 0, got " +
+                                    std::to_string(floor));
+}
+
+void validate_alpha(const std::vector<double>& alpha, std::size_t K) {
+    if (alpha.size() != K)
+        throw std::invalid_argument("alpha_prev length " + std::to_string(alpha.size()) +
+                                    " does not match n_states=" + std::to_string(K));
+    double asum = 0.0;
+    for (double v : alpha) {
+        if (!std::isfinite(v) || v < 0.0)
+            throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
+        asum += v;
+    }
+    if (std::abs(asum - 1.0) > kStochasticTol)
+        throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
+}
+
+}  // namespace
+
+Matrix apply_transition_floor(const Matrix& transmat, double floor) {
+    validate_transition_floor(floor);
+    Matrix out = transmat;
+    if (floor == 0.0) return out;
+    for (std::size_t i = 0; i < out.rows; ++i) {
+        double row = 0.0;
+        for (std::size_t j = 0; j < out.cols; ++j) {
+            out(i, j) += floor;
+            row += out(i, j);
+        }
+        for (std::size_t j = 0; j < out.cols; ++j) out(i, j) /= row;
+    }
+    return out;
+}
+
+GaussianHMM::GaussianHMM(int n_states, double tol, int max_iter, double var_floor,
+                         double transition_floor)
+    : n_states_(n_states), tol_(tol), max_iter_(max_iter), var_floor_(var_floor),
+      transition_floor_(transition_floor) {
     if (n_states < 2)
         throw std::invalid_argument("n_states must be >= 2 (K=1 is degenerate), got " +
                                     std::to_string(n_states));
     if (tol <= 0.0 || max_iter < 1 || var_floor <= 0.0)
         throw std::invalid_argument("tol and var_floor must be > 0 and max_iter >= 1");
+    validate_transition_floor(transition_floor);
 }
 
 HMMParams GaussianHMM::pinned_init(const Matrix& X) const {
@@ -239,6 +281,7 @@ HMMFitResult GaussianHMM::fit_impl(const Matrix& X, const HMMParams* init) {
                                     std::to_string(T) + ", K=" + std::to_string(n_states_));
     if (init) validate_params(*init, K, D);
     HMMParams params = init ? *init : pinned_init(X);
+    if (init) params.transmat = apply_transition_floor(params.transmat, transition_floor_);
 
     std::vector<double> history;
     double ll_prev = kNegInf;
@@ -506,17 +549,7 @@ std::vector<double> forward_step(const HMMParams& params,
                                  const std::vector<double>& x_t) {
     const std::size_t K = params.startprob.size(), D = params.means.cols;
     validate_params(params, K, D);
-    if (alpha_prev.size() != K)
-        throw std::invalid_argument("alpha_prev length " + std::to_string(alpha_prev.size()) +
-                                    " does not match n_states=" + std::to_string(K));
-    double asum = 0.0;
-    for (double v : alpha_prev) {
-        if (!std::isfinite(v) || v < 0.0)
-            throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
-        asum += v;
-    }
-    if (std::abs(asum - 1.0) > kStochasticTol)
-        throw std::invalid_argument("alpha_prev must be finite, non-negative and sum to 1");
+    validate_alpha(alpha_prev, K);
     if (x_t.size() != D)
         throw std::invalid_argument("observation length " + std::to_string(x_t.size()) +
                                     " does not match D=" + std::to_string(D));
@@ -547,6 +580,74 @@ std::vector<double> forward_step(const HMMParams& params,
             "forward step: the observation has zero likelihood under every reachable state");
     for (std::size_t j = 0; j < K; ++j) a[j] /= total;
     return a;
+}
+
+RegimeFilter::RegimeFilter(const HMMParams& params)
+    : K_(params.startprob.size()), D_(params.means.cols) {
+    validate_params(params, K_, D_);
+    if (D_ < 1) throw std::invalid_argument("means must have at least one dimension");
+    startprob_ = params.startprob;
+    transmat_ = params.transmat.data;
+    means_ = params.means.data;
+    variances_ = params.variances.data;
+    log_const_.assign(K_, 0.0);
+    for (std::size_t i = 0; i < K_; ++i)
+        for (std::size_t d = 0; d < D_; ++d)
+            log_const_[i] += kLog2Pi + std::log(variances_[i * D_ + d]);
+    logb_.assign(K_, 0.0);
+    next_.assign(K_, 0.0);
+    alpha_ = startprob_;
+}
+
+RegimeFilter::RegimeFilter(const HMMParams& params, const std::vector<double>& alpha_prev)
+    : RegimeFilter(params) {
+    reset(alpha_prev);
+}
+
+void RegimeFilter::reset() {
+    std::copy(startprob_.begin(), startprob_.end(), alpha_.begin());
+    started_ = false;
+}
+
+void RegimeFilter::reset(const std::vector<double>& alpha_prev) {
+    validate_alpha(alpha_prev, K_);
+    std::copy(alpha_prev.begin(), alpha_prev.end(), alpha_.begin());
+    started_ = true;
+}
+
+const std::vector<double>& RegimeFilter::update(const double* x, std::size_t n) {
+    if (n != D_)
+        throw std::invalid_argument("observation length " + std::to_string(n) +
+                                    " does not match D=" + std::to_string(D_));
+    for (std::size_t d = 0; d < D_; ++d)
+        if (!std::isfinite(x[d])) throw std::invalid_argument("observation contains NaN or inf");
+    double mx = kNegInf;
+    for (std::size_t i = 0; i < K_; ++i) {
+        double s = log_const_[i];
+        for (std::size_t d = 0; d < D_; ++d) {
+            const double diff = x[d] - means_[i * D_ + d];
+            s += diff * diff / variances_[i * D_ + d];
+        }
+        logb_[i] = -0.5 * s;
+        mx = std::max(mx, logb_[i]);
+    }
+    double total = 0.0;
+    for (std::size_t j = 0; j < K_; ++j) {
+        double prior = alpha_[j];
+        if (started_) {
+            prior = 0.0;
+            for (std::size_t i = 0; i < K_; ++i) prior += alpha_[i] * transmat_[i * K_ + j];
+        }
+        next_[j] = prior * std::exp(logb_[j] - mx);
+        total += next_[j];
+    }
+    if (!(total > 0.0))
+        throw std::invalid_argument(
+            "forward step: the observation has zero likelihood under every reachable state");
+    for (std::size_t j = 0; j < K_; ++j) next_[j] /= total;
+    alpha_.swap(next_);
+    started_ = true;
+    return alpha_;
 }
 
 }  // namespace regime

@@ -30,6 +30,9 @@ import java.util.Arrays;
  */
 public final class GaussianHmm {
 
+    /** Warm-start transition floor (0 is off). */
+    private final double transitionFloor;
+
     private static final double LOG_2PI = Math.log(2.0 * Math.PI);
 
     /** Pinned dead-state threshold on {@code sum_{t<T} gamma_t(i)} (API_SPEC 1.4). */
@@ -192,6 +195,21 @@ public final class GaussianHmm {
      * @throws IllegalArgumentException on invalid settings
      */
     public GaussianHmm(int nStates, double tol, int maxIter, double varFloor) {
+        this(nStates, tol, maxIter, varFloor, 0.0);
+    }
+
+    /**
+     * Creates a model with a warm-start transition floor (API_SPEC 1.3).
+     *
+     * @param nStates number of hidden states K (must be &gt;= 2)
+     * @param tol convergence tolerance on the log-likelihood improvement
+     * @param maxIter maximum number of E-steps
+     * @param varFloor lower bound applied to every variance after each update
+     * @param transitionFloor added to each transition entry of a warm-start
+     *     init before EM, rows renormalised; ignored on a cold start
+     * @throws IllegalArgumentException on invalid settings
+     */
+    public GaussianHmm(int nStates, double tol, int maxIter, double varFloor, double transitionFloor) {
         if (nStates < 2) {
             throw new IllegalArgumentException(
                     "n_states must be an integer >= 2 (K=1 is degenerate), got " + nStates);
@@ -199,10 +217,48 @@ public final class GaussianHmm {
         if (tol <= 0.0 || maxIter < 1 || varFloor <= 0.0) {
             throw new IllegalArgumentException("tol and var_floor must be > 0 and max_iter >= 1");
         }
+        validateTransitionFloor(transitionFloor);
+        this.transitionFloor = transitionFloor;
         this.nStates = nStates;
         this.tol = tol;
         this.maxIter = maxIter;
         this.varFloor = varFloor;
+    }
+
+    private static void validateTransitionFloor(double floor) {
+        if (!Double.isFinite(floor) || floor < 0.0) {
+            throw new IllegalArgumentException("transition_floor must be finite and >= 0, got " + floor);
+        }
+    }
+
+    /**
+     * Adds {@code floor} to every transition entry and renormalises the rows
+     * (API_SPEC 1.3): EM multiplies the old A_ij into the new one, so an entry
+     * at or near zero can never recover. A floor of 0 returns an exact copy.
+     *
+     * @param transmat row-stochastic matrix
+     * @param floor finite value &gt;= 0
+     * @return a new matrix
+     * @throws IllegalArgumentException if floor is negative or non-finite
+     */
+    public static double[][] applyTransitionFloor(double[][] transmat, double floor) {
+        validateTransitionFloor(floor);
+        double[][] out = new double[transmat.length][];
+        for (int i = 0; i < transmat.length; i++) {
+            out[i] = transmat[i].clone();
+            if (floor == 0.0) {
+                continue;
+            }
+            double row = 0.0;
+            for (int j = 0; j < out[i].length; j++) {
+                out[i][j] += floor;
+                row += out[i][j];
+            }
+            for (int j = 0; j < out[i].length; j++) {
+                out[i][j] /= row;
+            }
+        }
+        return out;
     }
 
     /** Returns the number of hidden states K. */
@@ -766,6 +822,9 @@ public final class GaussianHmm {
             validateParams(init, k, d);
         }
         HmmParams p = init != null ? init.copy() : pinnedInit(x);
+        if (init != null) {
+            p.transmat = applyTransitionFloor(p.transmat, transitionFloor);
+        }
 
         double[] history = new double[maxIter];
         double llPrev = Double.NEGATIVE_INFINITY;

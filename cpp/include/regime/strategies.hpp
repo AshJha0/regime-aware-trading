@@ -59,6 +59,12 @@ struct RegimeGateResult {
     std::vector<GaussianHMM> models; ///< Fitted models in refit order.
 };
 
+/// No-trade band on a gate series (API_SPEC 3.3):
+/// o[t] = g[t] if |g[t] - o[t-1]| > band else o[t-1], with o[-1] = 1.
+/// Causal; a band of 0 returns the gate unchanged.
+/// \throws std::invalid_argument if band is outside [0, 1] or gate is not finite.
+std::vector<double> apply_gate_band(const std::vector<double>& gate, double band);
+
 /// Walk-forward HMM regime gate on a market proxy (API_SPEC 3.3).
 ///
 /// First fit at t0 = train_min_days - 1 on the expanding window r[0..t0]
@@ -70,13 +76,17 @@ struct RegimeGateResult {
 /// forward_step updates in between.  Before the first fit the gate is 1.
 ///
 /// \param mode "prob" (gate = p_calm) or "binary" (1 if p_calm >= threshold).
+/// \param gate_band No-trade band in [0, 1] (apply_gate_band); default 0 (off).
+/// \param transition_floor Warm-start floor for the refits; default 0 (off).
 /// \throws std::invalid_argument if the series is shorter than
-///         train_min_days, the mode is unknown, or inputs are invalid.
+///         train_min_days, a return is <= -100 %, the mode is unknown, or
+///         inputs are invalid.
 RegimeGateResult regime_gate(const std::vector<double>& index_returns,
                              int n_states = 3, int train_min_days = 504,
                              int refit_days = 63, const std::string& mode = "prob",
                              double threshold = 0.5, double tol = 1e-8,
-                             int max_iter = 500, double var_floor = 1e-8);
+                             int max_iter = 500, double var_floor = 1e-8,
+                             double gate_band = 0.0, double transition_floor = 0.0);
 
 /// Scale each day's positions by that day's gate value:
 /// P_filtered[t] = gate[t] * P[t] (both day-t decisions, so the filtered

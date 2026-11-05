@@ -296,3 +296,56 @@ TEST(RegimeGate, ApplyGateRejectsNan) {
     Matrix pos(5, 2, 1.0);
     EXPECT_THROW(regime::apply_gate(pos, {1.0, std::nan(""), 0.0, 0.0, 0.0}), std::invalid_argument);
 }
+
+// No-trade band and the regime_gate return domain ------------------------
+
+TEST(GateBand, RecursionByHand) {
+    const std::vector<double> g{1.0, 0.8, 0.6, 0.65, 0.2, 0.45, 0.51};
+    const std::vector<double> want{1.0, 1.0, 0.6, 0.6, 0.2, 0.2, 0.51};
+    EXPECT_TRUE(regime::apply_gate_band(g, 0.3) == want);
+}
+
+TEST(GateBand, StrictAtTheEdge) {
+    EXPECT_EQ(regime::apply_gate_band({0.5}, 0.5)[0], 1.0);
+    EXPECT_EQ(regime::apply_gate_band({0.25}, 0.5)[0], 0.25);
+}
+
+TEST(GateBand, ZeroIsIdentityAndOneHoldsTheStart) {
+    const std::vector<double> g{0.1, 0.9, 0.9, 0.0, 1.0};
+    EXPECT_TRUE(regime::apply_gate_band(g, 0.0) == g);
+    EXPECT_TRUE(regime::apply_gate_band(g, 1.0) == std::vector<double>(5, 1.0));
+}
+
+TEST(GateBand, RangeIsChecked) {
+    const double nan = std::nan("");
+    for (double band : {-0.1, 1.1, nan}) {
+        EXPECT_THROW(regime::apply_gate_band({1.0}, band), std::invalid_argument);
+        EXPECT_THROW(regime::regime_gate(std::vector<double>(10, 0.0), 3, 5, 63, "prob", 0.5, 1e-8,
+                                         500, 1e-8, band),
+                     std::invalid_argument);
+    }
+}
+
+TEST(GateBand, RegimeGateEqualsPostProcessing) {
+    const std::vector<double> r(index_returns().begin(), index_returns().begin() + 700);
+    const auto raw = regime::regime_gate(r, 3, 504, 100);
+    const auto banded = regime::regime_gate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.3);
+    EXPECT_TRUE(banded.gate == regime::apply_gate_band(raw.gate, 0.3));
+}
+
+TEST(RegimeGate, RejectsATotalLossReturn) {
+    std::vector<double> r(20, 0.001);
+    r[7] = -1.0;
+    EXPECT_THROW(regime::regime_gate(r, 3, 10), std::invalid_argument);
+}
+
+TEST(RegimeGate, TransitionFloorZeroIsBitwiseDefault) {
+    const std::vector<double> r(index_returns().begin(), index_returns().begin() + 700);
+    const auto plain = regime::regime_gate(r, 3, 504, 100);
+    const auto zero =
+        regime::regime_gate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 0.0);
+    EXPECT_TRUE(plain.gate == zero.gate);
+    const auto floored =
+        regime::regime_gate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 1e-6);
+    for (double g : floored.gate) EXPECT_TRUE(g >= 0.0 && g <= 1.0);
+}

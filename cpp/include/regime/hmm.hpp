@@ -60,6 +60,12 @@ struct HMMParams {
 /// \throws std::invalid_argument on any violation.
 void validate_params(const HMMParams& p, std::size_t n_states, std::size_t n_dims);
 
+/// Add \p floor to every transition entry and renormalise the rows
+/// (API_SPEC 1.3): EM multiplies the old A_ij into the new one, so an entry
+/// at or near zero can never recover.  floor == 0 returns an exact copy.
+/// \throws std::invalid_argument if floor is negative or non-finite.
+Matrix apply_transition_floor(const Matrix& transmat, double floor);
+
 /// Outcome of a Baum-Welch fit.
 struct HMMFitResult {
     double log_likelihood{0.0};          ///< Log-likelihood of the returned parameters
@@ -93,9 +99,12 @@ public:
     /// \param max_iter Maximum number of EM iterations (E-steps).
     /// \param var_floor Lower bound applied to every variance after each
     ///                  update (guards zero-variance collapse).
+    /// \param transition_floor Added to each transition entry of a warm-start
+    ///                  init before EM, rows renormalised (API_SPEC 1.3);
+    ///                  ignored on a cold start.  Default 0 (off).
     /// \throws std::invalid_argument on invalid hyper-parameters.
     explicit GaussianHMM(int n_states, double tol = 1e-8, int max_iter = 500,
-                         double var_floor = 1e-8);
+                         double var_floor = 1e-8, double transition_floor = 0.0);
 
     /// Deterministic EM starting point (pinned rule, API_SPEC 1.3):
     /// per-dimension means at quantiles q_k = (2k+1)/(2K) (linear
@@ -172,6 +181,7 @@ private:
     double tol_;
     int max_iter_;
     double var_floor_;
+    double transition_floor_;
     bool fitted_{false};
     HMMParams params_;
     HMMFitResult fit_result_;
@@ -187,6 +197,70 @@ private:
 std::vector<double> forward_step(const HMMParams& params,
                                  const std::vector<double>& alpha_prev,
                                  const std::vector<double>& x_t);
+
+/// Streaming filter: forward_step with the set-up paid once (API_SPEC 1.10).
+///
+/// The constructor validates and copies the parameters, precomputes the
+/// log-variance terms and sizes every buffer; update() then checks only the
+/// observation and allocates nothing (except when it throws).  Without an
+/// alpha_prev the first update applies startprob with no transition, so a
+/// run over a series reproduces GaussianHMM::filtered_probabilities.
+class RegimeFilter {
+public:
+    /// \throws std::invalid_argument if params is invalid (validate_params).
+    explicit RegimeFilter(const HMMParams& params);
+
+    /// Start from a filtered posterior at t-1: the first update then equals
+    /// forward_step(params, alpha_prev, x).
+    /// \throws std::invalid_argument on invalid params or alpha_prev.
+    RegimeFilter(const HMMParams& params, const std::vector<double>& alpha_prev);
+
+    /// Restart from startprob, with no transition on the first update.
+    void reset();
+
+    /// Restart from a filtered posterior at t-1.
+    /// \throws std::invalid_argument if alpha_prev is not a length-K
+    ///         probability vector; the filter is then unchanged.
+    void reset(const std::vector<double>& alpha_prev);
+
+    /// Advance one observation of length n and return P(s_t | x_1..t).  The
+    /// reference stays valid for the life of the filter; its contents change
+    /// on the next update.
+    /// \throws std::invalid_argument if n != D, x is not finite, or x has
+    ///         zero likelihood under every reachable state; the filter is
+    ///         then unchanged.
+    const std::vector<double>& update(const double* x, std::size_t n);
+
+    /// Univariate overload (requires D == 1).
+    const std::vector<double>& update(double x) { return update(&x, 1); }
+
+    /// Vector overload.
+    const std::vector<double>& update(const std::vector<double>& x) {
+        return update(x.data(), x.size());
+    }
+
+    /// Current filtered posterior (startprob before any update).
+    const std::vector<double>& alpha() const { return alpha_; }
+
+    /// True once there is a filtered posterior to transition from.
+    bool started() const { return started_; }
+
+    std::size_t n_states() const { return K_; }
+    std::size_t n_dims() const { return D_; }
+
+private:
+    std::size_t K_;
+    std::size_t D_;
+    std::vector<double> startprob_;
+    std::vector<double> transmat_;   ///< Row-major K x K.
+    std::vector<double> means_;      ///< Row-major K x D.
+    std::vector<double> variances_;  ///< Row-major K x D.
+    std::vector<double> log_const_;  ///< sum_d (log 2 pi + log var_id), length K.
+    std::vector<double> logb_;       ///< Scratch, length K.
+    std::vector<double> next_;       ///< Scratch, length K; swapped with alpha_.
+    std::vector<double> alpha_;
+    bool started_{false};
+};
 
 }  // namespace regime
 

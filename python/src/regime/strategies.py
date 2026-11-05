@@ -204,6 +204,38 @@ def carry_total_returns(spot_returns: np.ndarray, rate_diffs: np.ndarray) -> np.
     return total
 
 
+def apply_gate_band(gate: np.ndarray, band: float) -> np.ndarray:
+    """No-trade band on a gate series (API_SPEC 3.3).
+
+    ``o[t] = g[t]`` if ``|g[t] - o[t-1]| > band`` else ``o[t-1]``, starting
+    from ``o[-1] = 1``.  Causal: ``o[t]`` uses nothing after day t.  A band
+    of 0 returns the gate unchanged.
+
+    Args:
+        gate: Gate values, shape ``(T,)``.
+        band: Band width in ``[0, 1]``.
+
+    Returns:
+        The banded gate, a new array of shape ``(T,)``.
+
+    Raises:
+        ValueError: If ``band`` is outside ``[0, 1]`` or ``gate`` is not a
+            finite 1-D array.
+    """
+    if not 0.0 <= band <= 1.0:
+        raise ValueError(f"gate_band must be in [0, 1], got {band}")
+    g = np.asarray(gate, dtype=float)
+    if g.ndim != 1 or not np.all(np.isfinite(g)):
+        raise ValueError("gate must be a finite 1-D array")
+    out = np.empty_like(g)
+    held = 1.0
+    for t in range(g.shape[0]):
+        if abs(g[t] - held) > band:
+            held = g[t]
+        out[t] = held
+    return out
+
+
 def regime_gate(
     index_returns: np.ndarray,
     n_states: int = 3,
@@ -214,6 +246,8 @@ def regime_gate(
     tol: float = 1e-8,
     max_iter: int = 500,
     var_floor: float = 1e-8,
+    gate_band: float = 0.0,
+    transition_floor: float = 0.0,
 ) -> Tuple[np.ndarray, List[GaussianHMM]]:
     """Walk-forward HMM regime gate on a market proxy.
 
@@ -246,14 +280,19 @@ def regime_gate(
         mode: 'prob' (scale by probability) or 'binary' (hard gate).
         threshold: Probability threshold for the binary gate.
         tol/max_iter/var_floor: EM settings, passed to :class:`GaussianHMM`.
+        gate_band: No-trade band in ``[0, 1]`` (:func:`apply_gate_band`).
+            Default 0 (off).
+        transition_floor: Warm-start floor passed to :class:`GaussianHMM`.
+            Default 0 (off).
 
     Returns:
         ``(gate, models)``: gate values in [0, 1], shape ``(T,)``, and the
         list of fitted models in refit order.
 
     Raises:
-        ValueError: If the series is shorter than ``train_min_days``, the
-            mode is unknown, ``threshold`` is outside ``[0, 1]``, the HMM
+        ValueError: If the series is shorter than ``train_min_days``, a
+            return is ``<= -100%`` (pinned), the mode is unknown,
+            ``threshold`` or ``gate_band`` is outside ``[0, 1]``, the HMM
             settings are invalid (``n_states < 2`` etc.), or a refit fails
             (the message then names the refit day ``t``).
     """
@@ -262,12 +301,17 @@ def regime_gate(
         raise ValueError("index_returns must be 1-D")
     if not np.all(np.isfinite(r)):
         raise ValueError("index_returns contain NaN or inf")
+    if np.any(r <= -1.0):
+        t = int(np.argmax(r <= -1.0))
+        raise ValueError(f"index_returns contain a return <= -100% at t={t} ({r[t]})")
     if mode not in ("prob", "binary"):
         raise ValueError(f"gate mode must be 'prob' or 'binary', got {mode!r}")
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"gate threshold must be in [0, 1], got {threshold}")
-    # Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1 up front.
-    GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor)
+    if not 0.0 <= gate_band <= 1.0:
+        raise ValueError(f"gate_band must be in [0, 1], got {gate_band}")
+    # Validates n_states >= 2, tol/var_floor > 0, max_iter >= 1, the floor up front.
+    GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor, transition_floor=transition_floor)
     T = r.shape[0]
     if train_min_days <= n_states or refit_days < 1:
         raise ValueError("train_min_days must exceed n_states and refit_days must be >= 1")
@@ -282,7 +326,9 @@ def regime_gate(
     calm_state = 0
     for t in range(t0, T):
         if (t - t0) % refit_days == 0:
-            model = GaussianHMM(n_states, tol=tol, max_iter=max_iter, var_floor=var_floor)
+            model = GaussianHMM(
+                n_states, tol=tol, max_iter=max_iter, var_floor=var_floor, transition_floor=transition_floor
+            )
             warm = models[-1].params.copy() if models else None
             try:
                 model.fit(r[: t + 1], init=warm)
@@ -299,7 +345,7 @@ def regime_gate(
                 raise ValueError(f"regime_gate forward step at t={t}: {exc}") from exc
         p_calm = float(alpha[calm_state])
         gate[t] = p_calm if mode == "prob" else (1.0 if p_calm >= threshold else 0.0)
-    return gate, models
+    return apply_gate_band(gate, gate_band), models
 
 
 def apply_gate(positions: np.ndarray, gate: np.ndarray) -> np.ndarray:

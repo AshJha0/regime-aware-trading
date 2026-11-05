@@ -441,3 +441,153 @@ def test_stationary_distribution_reports_nonconvergence():
     hmm.params.transmat = np.array([[0.5, 0.5, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5]])
     pi = hmm.stationary_distribution()
     assert pi == pytest.approx([1 / 3] * 3, abs=1e-10)
+
+
+# --------------------------------------------------------------------- #
+# Warm-start transition floor (API_SPEC 1.3)
+# --------------------------------------------------------------------- #
+def _revival_series() -> np.ndarray:
+    """Blocks of ten at +1 and -1 with a small integer-derived jitter."""
+    return np.array([(1.0 if (t // 10) % 2 == 0 else -1.0) + ((t * 7) % 5 - 2) * 0.05 for t in range(200)])
+
+
+def _revival_init() -> HMMParams:
+    """State 0 can never leave: A[0, 1] is exactly zero."""
+    return HMMParams(
+        np.array([0.5, 0.5]),
+        np.array([[1.0, 0.0], [0.5, 0.5]]),
+        np.array([[-1.0], [1.0]]),
+        np.array([[0.25], [0.25]]),
+    )
+
+
+def test_apply_transition_floor_by_hand():
+    from regime import apply_transition_floor
+
+    A = np.array([[1.0, 0.0], [0.5, 0.5]])
+    out = apply_transition_floor(A, 0.1)
+    assert out[0, 0] == pytest.approx(1.1 / 1.2, abs=1e-15)
+    assert out[0, 1] == pytest.approx(0.1 / 1.2, abs=1e-15)
+    assert out[1, 0] == pytest.approx(0.5, abs=1e-15)
+    assert np.array_equal(apply_transition_floor(A, 0.0), A)
+
+
+@pytest.mark.parametrize("floor", [-1e-9, float("nan"), float("inf")])
+def test_transition_floor_is_validated(floor):
+    from regime import apply_transition_floor
+
+    with pytest.raises(ValueError, match="transition_floor"):
+        apply_transition_floor(np.eye(2), floor)
+    with pytest.raises(ValueError, match="transition_floor"):
+        GaussianHMM(2, transition_floor=floor)
+
+
+def test_zero_transition_stays_dead_without_the_floor_and_revives_with_it():
+    x = _revival_series()
+    off = GaussianHMM(2)
+    off.fit(x, init=_revival_init())
+    assert off.params.transmat[0, 1] == 0.0  # EM cannot revive an exact zero
+
+    on = GaussianHMM(2, transition_floor=1e-3)
+    on.fit(x, init=_revival_init())
+    assert on.params.transmat[0, 1] > 0.05  # true block rate is 1/10
+    assert on.fit_result.log_likelihood > off.fit_result.log_likelihood
+
+
+def test_transition_floor_is_ignored_on_a_cold_start(index_returns):
+    r = index_returns[:300]
+    plain = GaussianHMM(2)
+    plain.fit(r)
+    floored = GaussianHMM(2, transition_floor=0.01)
+    floored.fit(r)
+    assert np.array_equal(plain.params.transmat, floored.params.transmat)
+
+
+def test_transition_floor_does_not_mutate_the_warm_start():
+    init = _revival_init()
+    GaussianHMM(2, transition_floor=0.1, max_iter=1).fit(_revival_series(), init=init)
+    assert init.transmat[0, 1] == 0.0
+
+
+# --------------------------------------------------------------------- #
+# Streaming filter (API_SPEC 1.10)
+# --------------------------------------------------------------------- #
+def test_regime_filter_equals_forward_step(pipeline_full, index_returns):
+    from regime import RegimeFilter, forward_step
+
+    p = pipeline_full["hmm3"].params
+    alpha = np.array([0.2, 0.3, 0.5])
+    filt = RegimeFilter(p, alpha)
+    for x in index_returns:
+        alpha = forward_step(p, alpha, x)
+        assert np.max(np.abs(filt.update(x) - alpha)) <= 1e-12
+
+
+def test_regime_filter_from_start_equals_filtered_probabilities(pipeline_full, index_returns):
+    from regime import RegimeFilter
+
+    filt = RegimeFilter(pipeline_full["hmm3"].params)
+    assert not filt.started
+    want = pipeline_full["hmm3"].filtered_probabilities(index_returns)
+    for t, x in enumerate(index_returns):
+        assert np.max(np.abs(filt.update(x) - want[t])) <= 1e-12
+    assert filt.started
+
+
+def test_regime_filter_two_dimensional_matches_forward_step():
+    from regime import RegimeFilter, forward_step
+
+    p = HMMParams(
+        np.array([0.5, 0.5]),
+        np.array([[0.9, 0.1], [0.2, 0.8]]),
+        np.array([[0.0, 1.0], [1.0, -1.0]]),
+        np.array([[1.0, 0.5], [2.0, 0.25]]),
+    )
+    alpha = np.array([0.5, 0.5])
+    filt = RegimeFilter(p, alpha)
+    for t in range(50):
+        x = np.array([np.sin(t), np.cos(0.5 * t)])
+        alpha = forward_step(p, alpha, x)
+        assert np.max(np.abs(filt.update(x) - alpha)) <= 1e-12
+
+
+def test_regime_filter_reset_and_copy_semantics(pipeline_full):
+    from regime import RegimeFilter
+
+    p = pipeline_full["hmm3"].params.copy()
+    filt = RegimeFilter(p)
+    first = filt.update(0.001)
+    p.means[0, 0] = 99.0  # the filter holds its own copy
+    filt.reset()
+    assert np.array_equal(filt.alpha, pipeline_full["hmm3"].params.startprob)
+    assert np.array_equal(filt.update(0.001), first)
+
+
+def test_regime_filter_validation_and_failed_update_keeps_state():
+    from regime import RegimeFilter
+
+    p = HMMParams(
+        np.array([1.0, 0.0]),
+        np.array([[1.0, 0.0], [0.0, 1.0]]),
+        np.array([[0.0], [1.0]]),
+        np.array([[1.0], [1.0]]),
+    )
+    with pytest.raises(ValueError, match="alpha_prev"):
+        RegimeFilter(p, np.array([0.7, 0.7]))
+    with pytest.raises(ValueError, match="alpha_prev"):
+        RegimeFilter(p, np.array([1.0]))
+    bad = p.copy()
+    bad.variances = np.array([[1.0], [0.0]])
+    with pytest.raises(ValueError, match="variances"):
+        RegimeFilter(bad)
+    filt = RegimeFilter(p)
+    with pytest.raises(ValueError, match="NaN"):
+        filt.update(float("nan"))
+    with pytest.raises(ValueError, match="length"):
+        filt.update(np.array([0.0, 1.0]))
+    # All mass on state 0, and x so far out that state 0's shifted density
+    # underflows while state 1 is the maximum: a zero normalizer.
+    with pytest.raises(ValueError, match="zero likelihood"):
+        filt.update(1e4)
+    assert not filt.started
+    assert np.array_equal(filt.alpha, p.startprob)

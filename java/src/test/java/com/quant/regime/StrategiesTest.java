@@ -343,4 +343,71 @@ public class StrategiesTest {
         assertThrows(IllegalArgumentException.class,
                 () -> Strategies.applyGate(pos, new double[] {1.0, Double.NaN, 0.0, 0.0, 0.0}));
     }
+
+    // No-trade band and the regime_gate return domain.
+
+    private static double[] head700() {
+        return Arrays.copyOf(TestData.indexReturns(), 700);
+    }
+
+    @Test
+    public void gateBandRecursionByHand() {
+        assertArrayEquals(new double[] {1.0, 1.0, 0.6, 0.6, 0.2, 0.2, 0.51},
+                Strategies.applyGateBand(new double[] {1.0, 0.8, 0.6, 0.65, 0.2, 0.45, 0.51}, 0.3), 0.0);
+    }
+
+    @Test
+    public void gateBandIsStrictAtTheEdge() {
+        assertEquals(1.0, Strategies.applyGateBand(new double[] {0.5}, 0.5)[0], 0.0);
+        assertEquals(0.25, Strategies.applyGateBand(new double[] {0.25}, 0.5)[0], 0.0);
+    }
+
+    @Test
+    public void gateBandZeroIsIdentityAndOneHoldsTheStart() {
+        double[] g = {0.1, 0.9, 0.9, 0.0, 1.0};
+        assertArrayEquals(g, Strategies.applyGateBand(g, 0.0), 0.0);
+        assertArrayEquals(new double[] {1, 1, 1, 1, 1}, Strategies.applyGateBand(g, 1.0), 0.0);
+    }
+
+    @Test
+    public void gateBandRangeIsChecked() {
+        for (double band : new double[] {-0.1, 1.1, Double.NaN}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Strategies.applyGateBand(new double[] {1.0}, band));
+            assertThrows(IllegalArgumentException.class, () -> Strategies.regimeGate(new double[10], 3,
+                    5, 63, "prob", 0.5, 1e-8, 500, 1e-8, band, 0.0));
+        }
+    }
+
+    @Test
+    public void regimeGateBandEqualsPostProcessing() {
+        double[] r = head700();
+        double[] raw = Strategies.regimeGate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8).gate();
+        double[] banded = Strategies.regimeGate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.3, 0.0)
+                .gate();
+        assertArrayEquals(Strategies.applyGateBand(raw, 0.3), banded, 0.0);
+    }
+
+    @Test
+    public void regimeGateRejectsATotalLossReturn() {
+        double[] r = new double[20];
+        Arrays.fill(r, 0.001);
+        r[7] = -1.0;
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> Strategies.regimeGate(r, 3, 10, 63, "prob", 0.5, 1e-8, 500, 1e-8));
+        assertTrue(e.getMessage(), e.getMessage().contains("<= -100% at t=7"));
+    }
+
+    @Test
+    public void regimeGateTransitionFloorZeroIsBitwiseDefault() {
+        double[] r = head700();
+        double[] plain = Strategies.regimeGate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8).gate();
+        double[] zero = Strategies.regimeGate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 0.0)
+                .gate();
+        assertArrayEquals(plain, zero, 0.0);
+        for (double g : Strategies.regimeGate(r, 3, 504, 100, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 1e-6)
+                .gate()) {
+            assertTrue(g >= 0.0 && g <= 1.0);
+        }
+    }
 }

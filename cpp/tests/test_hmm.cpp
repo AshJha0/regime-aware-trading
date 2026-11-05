@@ -507,3 +507,160 @@ TEST(HmmRobust, StationaryDistributionReportsNonConvergence) {
     const auto pi = hmm.stationary_distribution();
     for (double v : pi) EXPECT_NEAR(v, 1.0 / 3.0, 1e-10);
 }
+
+// Warm-start transition floor (API_SPEC 1.3) -----------------------------
+
+namespace {
+
+regime::Matrix revival_series() {
+    regime::Matrix x(200, 1);
+    for (int t = 0; t < 200; ++t)
+        x(static_cast<std::size_t>(t), 0) =
+            ((t / 10) % 2 == 0 ? 1.0 : -1.0) + ((t * 7) % 5 - 2) * 0.05;
+    return x;
+}
+
+regime::HMMParams two_state(double a00, double a01, double a10, double a11) {
+    regime::HMMParams p;
+    p.startprob = {0.5, 0.5};
+    p.transmat = regime::Matrix(2, 2);
+    p.transmat(0, 0) = a00;
+    p.transmat(0, 1) = a01;
+    p.transmat(1, 0) = a10;
+    p.transmat(1, 1) = a11;
+    p.means = regime::Matrix(2, 1);
+    p.means(0, 0) = -1.0;
+    p.means(1, 0) = 1.0;
+    p.variances = regime::Matrix(2, 1, 0.25);
+    return p;
+}
+
+}  // namespace
+
+TEST(TransitionFloor, ByHand) {
+    const auto p = two_state(1.0, 0.0, 0.5, 0.5);
+    const regime::Matrix out = regime::apply_transition_floor(p.transmat, 0.1);
+    EXPECT_NEAR(out(0, 0), 1.1 / 1.2, 1e-15);
+    EXPECT_NEAR(out(0, 1), 0.1 / 1.2, 1e-15);
+    EXPECT_NEAR(out(1, 0), 0.5, 1e-15);
+    EXPECT_TRUE(regime::apply_transition_floor(p.transmat, 0.0).data == p.transmat.data);
+}
+
+TEST(TransitionFloor, IsValidated) {
+    const auto p = two_state(1.0, 0.0, 0.5, 0.5);
+    for (double f : {-1e-9, std::nan(""), std::numeric_limits<double>::infinity()}) {
+        EXPECT_THROW(regime::apply_transition_floor(p.transmat, f), std::invalid_argument);
+        EXPECT_THROW(regime::GaussianHMM(2, 1e-8, 500, 1e-8, f), std::invalid_argument);
+    }
+}
+
+TEST(TransitionFloor, RevivesAZeroEntry) {
+    const auto x = revival_series();
+    const auto init = two_state(1.0, 0.0, 0.5, 0.5);
+    regime::GaussianHMM off(2);
+    const auto r_off = off.fit(x, init);
+    EXPECT_EQ(off.params().transmat(0, 1), 0.0);  // EM cannot revive an exact zero
+    regime::GaussianHMM on(2, 1e-8, 500, 1e-8, 1e-3);
+    const auto r_on = on.fit(x, init);
+    EXPECT_GT(on.params().transmat(0, 1), 0.05);  // true block rate is 1/10
+    EXPECT_GT(r_on.log_likelihood, r_off.log_likelihood);
+}
+
+TEST(TransitionFloor, IgnoredOnAColdStart) {
+    const auto x = regime_tests::index_head(300);
+    regime::GaussianHMM plain(2);
+    plain.fit(x);
+    regime::GaussianHMM floored(2, 1e-8, 500, 1e-8, 0.01);
+    floored.fit(x);
+    EXPECT_TRUE(plain.params().transmat.data == floored.params().transmat.data);
+}
+
+// Streaming filter (API_SPEC 1.10) ----------------------------------------
+
+namespace {
+
+regime::GaussianHMM fitted_k3() {
+    regime::GaussianHMM m(3);
+    m.fit(regime_tests::index_head(600));
+    return m;
+}
+
+double max_abs_diff(const std::vector<double>& a, const std::vector<double>& b) {
+    double out = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) out = std::max(out, std::abs(a[i] - b[i]));
+    return out;
+}
+
+}  // namespace
+
+TEST(RegimeFilter, EqualsForwardStep) {
+    const auto m = fitted_k3();
+    std::vector<double> alpha{0.2, 0.3, 0.5};
+    regime::RegimeFilter filt(m.params(), alpha);
+    for (double x : regime_tests::index_returns()) {
+        alpha = regime::forward_step(m.params(), alpha, {x});
+        EXPECT_LE(max_abs_diff(filt.update(x), alpha), 1e-12);
+    }
+}
+
+TEST(RegimeFilter, FromStartEqualsFilteredProbabilities) {
+    const auto m = fitted_k3();
+    const auto& r = regime_tests::index_returns();
+    const regime::Matrix want = m.filtered_probabilities(regime::to_matrix(r));
+    regime::RegimeFilter filt(m.params());
+    EXPECT_FALSE(filt.started());
+    for (std::size_t t = 0; t < r.size(); ++t) {
+        const auto& a = filt.update(r[t]);
+        for (std::size_t k = 0; k < 3; ++k) EXPECT_NEAR(a[k], want(t, k), 1e-12);
+    }
+    EXPECT_TRUE(filt.started());
+}
+
+TEST(RegimeFilter, TwoDimensionalMatchesForwardStep) {
+    regime::HMMParams p = two_state(0.9, 0.1, 0.2, 0.8);
+    p.means = regime::Matrix(2, 2);
+    p.means(0, 1) = 1.0;
+    p.means(1, 0) = 1.0;
+    p.means(1, 1) = -1.0;
+    p.variances = regime::Matrix(2, 2);
+    p.variances(0, 0) = 1.0;
+    p.variances(0, 1) = 0.5;
+    p.variances(1, 0) = 2.0;
+    p.variances(1, 1) = 0.25;
+    std::vector<double> alpha{0.5, 0.5};
+    regime::RegimeFilter filt(p, alpha);
+    for (int t = 0; t < 50; ++t) {
+        const std::vector<double> x{std::sin(t), std::cos(0.5 * t)};
+        alpha = regime::forward_step(p, alpha, x);
+        EXPECT_LE(max_abs_diff(filt.update(x), alpha), 1e-12);
+    }
+}
+
+TEST(RegimeFilter, ResetAndOwnCopy) {
+    const auto m = fitted_k3();
+    regime::HMMParams p = m.params();
+    regime::RegimeFilter filt(p);
+    const std::vector<double> first = filt.update(0.001);
+    p.means(0, 0) = 99.0;  // the filter holds its own copy
+    filt.reset();
+    EXPECT_TRUE(filt.alpha() == m.params().startprob);
+    EXPECT_TRUE(filt.update(0.001) == first);
+}
+
+TEST(RegimeFilter, ValidationAndFailedUpdateKeepsState) {
+    regime::HMMParams p = two_state(1.0, 0.0, 0.0, 1.0);
+    p.startprob = {1.0, 0.0};
+    p.means(0, 0) = 0.0;
+    p.variances = regime::Matrix(2, 1, 1.0);
+    EXPECT_THROW(regime::RegimeFilter(p, {0.7, 0.7}), std::invalid_argument);
+    EXPECT_THROW(regime::RegimeFilter(p, {1.0}), std::invalid_argument);
+    regime::HMMParams bad = p;
+    bad.variances(1, 0) = 0.0;
+    EXPECT_THROW(regime::RegimeFilter{bad}, std::invalid_argument);
+    regime::RegimeFilter filt(p);
+    EXPECT_THROW(filt.update(std::nan("")), std::invalid_argument);
+    EXPECT_THROW(filt.update(std::vector<double>{0.0, 1.0}), std::invalid_argument);
+    EXPECT_THROW(filt.update(1e4), std::invalid_argument);  // zero normalizer
+    EXPECT_FALSE(filt.started());
+    EXPECT_TRUE(filt.alpha() == p.startprob);
+}

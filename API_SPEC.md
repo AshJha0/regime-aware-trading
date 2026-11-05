@@ -87,6 +87,24 @@ For K states on data of T observations (require `T > K`, else error):
 Walk-forward refits (section 3.3) **warm-start** from the previous fitted
 (already label-sorted) parameter set instead of the pinned init.
 
+**Warm-start transition floor** (`transition_floor`, default 0, off). EM
+multiplies the old `A_ij` into the new one, so an entry that reached zero
+stays there and a near-zero entry (1e-184 on the bundled refits) cannot
+recover in any useful number of iterations. With `f > 0`, a warm start
+replaces `A` before EM by
+
+```
+A_ij <- (A_ij + f) / sum_j (A_ij + f)
+```
+
+`startprob`, means and variances are untouched, the caller's `init` is not
+modified, and a cold start ignores `f`. `f = 0` leaves `A` bit-for-bit
+unchanged. `f` must be finite and `>= 0`, else an error at construction.
+`apply_transition_floor(transmat, f)` is public in every language; the
+model takes `f` at construction (Python `transition_floor=`; C++ fifth
+constructor argument; Rust `with_transition_floor`; Java fifth constructor
+argument). The floor only restarts an entry: EM may drive it back down.
+
 ### 1.4 Convergence, monotonicity and dead-state semantics (pinned)
 
 `tol = 1e-8` on the log-likelihood, `max_iter = 500`. Loop:
@@ -186,6 +204,36 @@ EM non-convergence, a dead state and a non-monotone step are NOT errors
 (1.4). K larger than the distinct-value support of the data must not
 crash: the variance floor engages (tested).
 
+### 1.10 Streaming filter (`RegimeFilter`)
+
+`forward_step` stays the stateless, fully validated form. `RegimeFilter`
+is the same recursion with the set-up paid once:
+
+* **Construction** validates the parameters as `forward_step` does (and
+  requires `D >= 1`), takes its own copy of them, and precomputes
+  `c_i = sum_d (log(2*pi) + log(var_id))`, so
+  `log b_t(i) = -0.5 * (c_i + sum_d (x_td - mu_id)^2 / var_id)`.
+* `RegimeFilter(params, alpha_prev)`: the first update equals
+  `forward_step(params, alpha_prev, x)`, and each later one continues the
+  chain; agreement is within 1e-12 per entry (tested on the bundled
+  series; the two differ only in rounding).
+* `RegimeFilter(params)`: the first update is `a~_1` of 1.1 (`startprob`,
+  no transition), so a run over a series reproduces
+  `filtered_probabilities` within 1e-12 (tested).
+* `update(x)` checks `len(x) == D` and finiteness, and returns the new
+  filtered posterior. A failed update raises the 1.9 error type and leaves
+  the filter unchanged, including a zero normalizer.
+* `reset()` / `reset(alpha_prev)` restart the filter; `alpha` is the current
+  posterior (`startprob` before the first update); `started` says whether
+  the next update applies the transition.
+* **Allocation (pinned for C++ and Rust)**: `update` allocates nothing on
+  the success path (tested with a counting allocator in both). Python and
+  Java carry the same API for parity with no such promise. Return value:
+  C++ a reference to, Rust a slice of, Java the array of, the internal
+  posterior, overwritten by the next update; Python a copy.
+
+The walk-forward gate keeps using `forward_step`.
+
 ---
 
 ## 2. No-lookahead accounting (backtest engine, pinned)
@@ -265,10 +313,10 @@ wipe-out (2).
 
 **Simple-return domain (pinned)**: every *return* input (`momentum_positions`,
 `ewma_variance`, `carry_total_returns` spot returns, `run_backtest`
-returns) must be finite **and `> -1`**; a -100 % (or worse) print is
+returns, `regime_gate` index returns) must be finite **and `> -1`**; a -100 % (or worse) print is
 corrupt data (a zero price, an unadjusted split) that would turn every
-trailing growth ratio into `0/0` and is rejected with the day and asset
-index in the message. Rate differentials, positions and gate values are
+trailing growth ratio into `0/0` and is rejected with the day index (and
+asset index, for a panel) in the message. Rate differentials, positions and gate values are
 not simple returns and carry no such bound.
 
 ### 3.1 Time-series momentum
@@ -310,10 +358,12 @@ Require `1 <= top_n`, `1 <= bottom_n`, `top_n + bottom_n <= A`,
 ### 3.3 Regime filter (walk-forward HMM gate)
 
 Config: `n_states = 3`, `train_min_days = 504`, `refit_days = 63`,
-`gate_mode = "prob"` (alternative `"binary"`), `gate_threshold = 0.5`.
+`gate_mode = "prob"` (alternative `"binary"`), `gate_threshold = 0.5`,
+`gate_band = 0` and `transition_floor = 0` (both optional, off by default).
 Fitted on the market-index return series. Require
 `T >= train_min_days > n_states`, `refit_days >= 1`,
-`0 <= gate_threshold <= 1`, and valid HMM settings (`n_states >= 2`,
+`0 <= gate_threshold <= 1`, `0 <= gate_band <= 1`, a valid
+`transition_floor` (1.3), and valid HMM settings (`n_states >= 2`,
 `tol > 0`, `max_iter >= 1`, `var_floor > 0`) — all checked **before** the
 first fit; unknown mode is an error. A refit or forward step that fails
 re-raises the same error type with the day index prepended
@@ -334,6 +384,23 @@ re-raises the same error type with the day index prepended
   lookahead). For `t < t0`: `gate[t] = 1`.
 * `mode "prob"`: `gate[t] = p_calm(t)`;
   `mode "binary"`: `gate[t] = 1 if p_calm(t) >= gate_threshold else 0`.
+* **No-trade band (pinned)**: after computing `g[t]` as above, the gate
+  actually applied is
+
+  ```
+  o[t] = g[t]    if |g[t] - o[t-1]| > gate_band      (strict)
+  o[t] = o[t-1]  otherwise
+  o[t0-1] = 1
+  ```
+
+  Causal: `o[t]` uses `g[0..t]` only. `gate_band = 0` gives `o = g`
+  exactly. Because `g[t] = 1` before `t0`, the recursion may equally start
+  at day 0 from 1: that is `apply_gate_band(gate, band)`, public in every
+  language, and `regime_gate(..., gate_band)` returns its output (the
+  models are unaffected). Rust passes both options through
+  `regime_gate_with(..., GateOptions)`. On the bundled data a band of 0.3
+  takes filtered carry turnover from 18.4 to 6.7 per year, but the value
+  was chosen by looking at this sample: it is exploratory, not a default.
 * **Application**: `P_filtered[t, a] = gate[t] * P[t, a]` (both are day-t
   decisions; the accounting of section 2 then applies them to day t+1).
 
@@ -365,7 +432,9 @@ floats printed with `%.10f`:
 `momentum_lookback`, `vol_target`, `ewma_lambda`, `leverage_cap`,
 `carry_top_n`, `carry_bottom_n`, `rebalance_days`, `train_min_days`,
 `refit_days`, `gate_mode`, `gate_threshold`, `cost_bps`, `trading_days`.
-Integer keys must hold integral values (`3.0` is rejected by every
+Optional keys `gate_band` and `transition_floor` must be finite numbers
+when present; an absent key means 0 (the bundled file has neither). Range
+checks are those of 3.3. Integer keys must hold integral values (`3.0` is rejected by every
 loader; `trading_days` is informational — the annualization constant 252
 is compiled into every port). `true_states.csv` labels must be integers
 in `[0, 2]` (checked at load).
@@ -416,11 +485,18 @@ suite loads this file and asserts each `expect` key within `tol`
 | `turnover_carry` | `mean_turnover` (mean daily, unfiltered) | 1e-8 |
 | `carry_rerank_positions` | `mean_turnover`, `turnover_day21`, `turnover_day42`, `pos_day{15,21,42}_asset{0,3}` | 0 (exact) |
 | `carry_rerank_backtest` | `ann_return`, `sharpe`, `max_dd` | 1e-8 |
+| `gate_band_0p3` | `mean_turnover_momentum`, `mean_turnover_carry` (mean daily, filtered), `sharpe_combined` (full sample, filtered) | 1e-8 |
 
-20 cases, 77 scalars; every language's golden test compares all 77.
+21 cases, 80 scalars; every language's golden test compares all 80.
+
+**`gate_band_0p3`**: `inputs = {gate_band: 0.3}`. Every port applies
+`apply_gate_band` to the pipeline gate and reruns the filtered backtests
+(`gate_band_values`). The case pins the mechanism; 0.3 is a tuned value and
+not a recommended setting. The closest any bundled `|g[t] - o[t-1]|` comes
+to the band is 6.9e-4, so rounding cannot flip a band decision across ports.
 
 **`carry_rerank_*` (synthetic panel in `inputs`)**: the only two cases
-whose `inputs` are non-empty. `inputs = {n_days: 63, n_assets: 4,
+that build their own data. `inputs = {n_days: 63, n_assets: 4,
 switch_days: [0, 10, 42], diffs: [[0.04, 0.03, 0.02, 0.01],
 [0.01, 0.02, 0.03, 0.04], [0.02, 0.02, 0.02, 0.02]], top_n: 1,
 bottom_n: 1, rebalance_days: 21, cost_bps: 5.0}`. The panel is

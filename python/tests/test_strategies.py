@@ -282,3 +282,71 @@ def test_apply_gate_rejects_nan_gate():
         apply_gate(pos, np.array([1.0, np.nan, 0.0, 0.0, 0.0]))
     with pytest.raises(ValueError):
         apply_gate(pos, np.ones((5, 1)))  # not 1-D
+
+
+# --------------------------------------------------------------------- #
+# No-trade band and the regime_gate return domain
+# --------------------------------------------------------------------- #
+def test_gate_band_recursion_by_hand():
+    from regime import apply_gate_band
+
+    g = [1.0, 0.8, 0.6, 0.65, 0.2, 0.45, 0.51]
+    # held starts at 1: 0.8 stays inside, 0.6 is 0.4 away, 0.65 inside,
+    # 0.2 outside, 0.45 inside, 0.51 outside.
+    assert list(apply_gate_band(g, 0.3)) == [1.0, 1.0, 0.6, 0.6, 0.2, 0.2, 0.51]
+
+
+def test_gate_band_is_strict_at_the_edge():
+    from regime import apply_gate_band
+
+    assert list(apply_gate_band([0.5], 0.5)) == [1.0]  # |0.5 - 1| == band: no move
+    assert list(apply_gate_band([0.25], 0.5)) == [0.25]
+
+
+def test_gate_band_zero_is_identity_and_one_holds_the_start():
+    from regime import apply_gate_band
+
+    g = np.array([0.1, 0.9, 0.9, 0.0, 1.0])
+    assert np.array_equal(apply_gate_band(g, 0.0), g)
+    assert np.array_equal(apply_gate_band(g, 1.0), np.ones(5))
+
+
+@pytest.mark.parametrize("band", [-0.1, 1.1, float("nan")])
+def test_gate_band_range_is_checked(band):
+    from regime import apply_gate_band, regime_gate
+
+    with pytest.raises(ValueError, match="gate_band"):
+        apply_gate_band([1.0], band)
+    with pytest.raises(ValueError, match="gate_band"):
+        regime_gate(np.zeros(10), train_min_days=5, gate_band=band)
+
+
+def test_regime_gate_band_equals_post_processing(index_returns):
+    from regime import apply_gate_band, regime_gate
+
+    r = index_returns[:700]
+    raw, _ = regime_gate(r, train_min_days=504, refit_days=100)
+    banded, _ = regime_gate(r, train_min_days=504, refit_days=100, gate_band=0.3)
+    assert np.array_equal(banded, apply_gate_band(raw, 0.3))
+    assert np.count_nonzero(np.diff(banded)) < np.count_nonzero(np.diff(raw))
+
+
+def test_regime_gate_rejects_a_total_loss_return():
+    from regime import regime_gate
+
+    r = np.full(20, 0.001)
+    r[7] = -1.0
+    with pytest.raises(ValueError, match=r"<= -100% at t=7"):
+        regime_gate(r, train_min_days=10)
+
+
+def test_regime_gate_transition_floor_zero_is_bitwise_default(index_returns):
+    from regime import regime_gate
+
+    r = index_returns[:700]
+    plain, _ = regime_gate(r, train_min_days=504, refit_days=100)
+    zero, _ = regime_gate(r, train_min_days=504, refit_days=100, transition_floor=0.0)
+    floored, models = regime_gate(r, train_min_days=504, refit_days=100, transition_floor=1e-6)
+    assert np.array_equal(plain, zero)
+    assert np.all((floored >= 0.0) & (floored <= 1.0))
+    assert all(m.transition_floor == 1e-6 for m in models)

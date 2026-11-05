@@ -10,8 +10,8 @@ from regime import golden_cases
 
 def test_golden_file_has_expected_cases(golden):
     names = [c["name"] for c in golden["cases"]]
-    assert len(names) == 20
-    assert len(set(names)) == 20
+    assert len(names) == 21
+    assert len(set(names)) == 21
     for required in (
         "hmm_k2_loglik",
         "hmm_k3_loglik",
@@ -33,6 +33,7 @@ def test_golden_file_has_expected_cases(golden):
         "turnover_carry",
         "carry_rerank_positions",
         "carry_rerank_backtest",
+        "gate_band_0p3",
     ):
         assert required in names
     by_name = {c["name"]: c for c in golden["cases"]}
@@ -61,7 +62,7 @@ def test_golden_values_reproduced(golden, pipeline_full):
             else:
                 assert value == pytest.approx(expect, abs=tol), f"{case['name']}:{key}"
             checked += 1
-    assert checked == 77  # every scalar across the 20 cases
+    assert checked == 80  # every scalar across the 21 cases
 
 
 def test_golden_sign_cases(golden):

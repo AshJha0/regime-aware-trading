@@ -542,4 +542,134 @@ public class HmmTest {
             assertEquals(1.0 / 3.0, v, 1e-10);
         }
     }
+
+    // Warm-start transition floor (API_SPEC 1.3).
+
+    private static double[] revivalSeries() {
+        double[] x = new double[200];
+        for (int t = 0; t < 200; t++) {
+            x[t] = ((t / 10) % 2 == 0 ? 1.0 : -1.0) + ((t * 7) % 5 - 2) * 0.05;
+        }
+        return x;
+    }
+
+    private static HmmParams twoState(double[][] a) {
+        return new HmmParams(new double[] {0.5, 0.5}, a, new double[][] {{-1.0}, {1.0}},
+                new double[][] {{0.25}, {0.25}});
+    }
+
+    @Test
+    public void applyTransitionFloorByHand() {
+        double[][] a = {{1.0, 0.0}, {0.5, 0.5}};
+        double[][] out = GaussianHmm.applyTransitionFloor(a, 0.1);
+        assertEquals(1.1 / 1.2, out[0][0], 1e-15);
+        assertEquals(0.1 / 1.2, out[0][1], 1e-15);
+        assertEquals(0.5, out[1][0], 1e-15);
+        assertArrayEquals(a[0], GaussianHmm.applyTransitionFloor(a, 0.0)[0], 0.0);
+    }
+
+    @Test
+    public void transitionFloorIsValidated() {
+        for (double f : new double[] {-1e-9, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> GaussianHmm.applyTransitionFloor(new double[][] {{1.0}}, f));
+            assertThrows(IllegalArgumentException.class, () -> new GaussianHmm(2, 1e-8, 500, 1e-8, f));
+        }
+    }
+
+    @Test
+    public void zeroTransitionStaysDeadWithoutTheFloorAndRevivesWithIt() {
+        double[] x = revivalSeries();
+        double[][] a = {{1.0, 0.0}, {0.5, 0.5}};
+        GaussianHmm off = new GaussianHmm(2);
+        HmmFitResult rOff = off.fit(x, twoState(a));
+        assertEquals(0.0, off.params().transmat[0][1], 0.0);
+        GaussianHmm on = new GaussianHmm(2, 1e-8, 500, 1e-8, 1e-3);
+        HmmFitResult rOn = on.fit(x, twoState(a));
+        assertTrue(on.params().transmat[0][1] > 0.05);
+        assertTrue(rOn.logLikelihood() > rOff.logLikelihood());
+    }
+
+    @Test
+    public void transitionFloorIsIgnoredOnAColdStart() {
+        double[] r = java.util.Arrays.copyOf(TestData.indexReturns(), 300);
+        GaussianHmm plain = new GaussianHmm(2);
+        plain.fit(r);
+        GaussianHmm floored = new GaussianHmm(2, 1e-8, 500, 1e-8, 0.01);
+        floored.fit(r);
+        assertArrayEquals(plain.params().transmat[0], floored.params().transmat[0], 0.0);
+    }
+
+    // Streaming filter (API_SPEC 1.10).
+
+    private static GaussianHmm fittedK3() {
+        GaussianHmm m = new GaussianHmm(3);
+        m.fit(java.util.Arrays.copyOf(TestData.indexReturns(), 600));
+        return m;
+    }
+
+    @Test
+    public void regimeFilterEqualsForwardStep() {
+        HmmParams p = fittedK3().params();
+        double[] alpha = {0.2, 0.3, 0.5};
+        RegimeFilter filt = new RegimeFilter(p, alpha);
+        for (double x : TestData.indexReturns()) {
+            alpha = GaussianHmm.forwardStep(p, alpha, new double[] {x});
+            assertArrayEquals(alpha, filt.update(x), 1e-12);
+        }
+    }
+
+    @Test
+    public void regimeFilterFromStartEqualsFilteredProbabilities() {
+        GaussianHmm m = fittedK3();
+        double[] r = TestData.indexReturns();
+        double[][] want = m.filteredProbabilities(r);
+        RegimeFilter filt = new RegimeFilter(m.params());
+        assertFalse(filt.started());
+        for (int t = 0; t < r.length; t++) {
+            assertArrayEquals(want[t], filt.update(r[t]), 1e-12);
+        }
+        assertTrue(filt.started());
+    }
+
+    @Test
+    public void regimeFilterTwoDimensionalMatchesForwardStep() {
+        HmmParams p = new HmmParams(new double[] {0.5, 0.5}, new double[][] {{0.9, 0.1}, {0.2, 0.8}},
+                new double[][] {{0.0, 1.0}, {1.0, -1.0}}, new double[][] {{1.0, 0.5}, {2.0, 0.25}});
+        double[] alpha = {0.5, 0.5};
+        RegimeFilter filt = new RegimeFilter(p, alpha);
+        for (int t = 0; t < 50; t++) {
+            double[] x = {Math.sin(t), Math.cos(0.5 * t)};
+            alpha = GaussianHmm.forwardStep(p, alpha, x);
+            assertArrayEquals(alpha, filt.update(x), 1e-12);
+        }
+    }
+
+    @Test
+    public void regimeFilterResetAndOwnCopy() {
+        GaussianHmm m = fittedK3();
+        HmmParams p = m.params().copy();
+        RegimeFilter filt = new RegimeFilter(p);
+        double[] first = filt.update(0.001).clone();
+        p.means[0][0] = 99.0; // the filter holds its own copy
+        filt.reset();
+        assertArrayEquals(m.params().startprob, filt.alpha(), 0.0);
+        assertArrayEquals(first, filt.update(0.001), 0.0);
+    }
+
+    @Test
+    public void regimeFilterValidationAndFailedUpdateKeepsState() {
+        HmmParams p = new HmmParams(new double[] {1.0, 0.0}, new double[][] {{1.0, 0.0}, {0.0, 1.0}},
+                new double[][] {{0.0}, {1.0}}, new double[][] {{1.0}, {1.0}});
+        assertThrows(IllegalArgumentException.class, () -> new RegimeFilter(p, new double[] {0.7, 0.7}));
+        assertThrows(IllegalArgumentException.class, () -> new RegimeFilter(p, new double[] {1.0}));
+        RegimeFilter filt = new RegimeFilter(p);
+        assertThrows(IllegalArgumentException.class, () -> filt.update(Double.NaN));
+        assertThrows(IllegalArgumentException.class, () -> filt.update(new double[] {0.0, 1.0}));
+        IllegalArgumentException e =
+                assertThrows(IllegalArgumentException.class, () -> filt.update(1e4)); // zero normalizer
+        assertTrue(e.getMessage(), e.getMessage().contains("zero likelihood"));
+        assertFalse(filt.started());
+        assertArrayEquals(p.startprob, filt.alpha(), 0.0);
+    }
 }

@@ -27,7 +27,7 @@ fn load_golden() -> GoldenFile {
     serde_json::from_str(&text).expect("golden.json parses")
 }
 
-const REQUIRED: [&str; 20] = [
+const REQUIRED: [&str; 21] = [
     "hmm_k2_loglik",
     "hmm_k3_loglik",
     "hmm_k3_means",
@@ -48,13 +48,14 @@ const REQUIRED: [&str; 20] = [
     "turnover_carry",
     "carry_rerank_positions",
     "carry_rerank_backtest",
+    "gate_band_0p3",
 ];
 
 #[test]
 fn golden_file_has_expected_cases() {
     let golden = load_golden();
     let names: Vec<&str> = golden.cases.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 21);
     for required in REQUIRED {
         assert!(names.contains(&required), "missing golden case {required}");
     }
@@ -85,6 +86,10 @@ fn golden_values_reproduced() {
                 serde_json::from_value(case.inputs.clone()).expect("carry_rerank inputs parse");
             computed.insert(case.name.clone(), carry_rerank_values(&inputs).expect("rerank case runs"));
         }
+        if case.name == "gate_band_0p3" {
+            let band = case.inputs["gate_band"].as_f64().expect("gate_band input");
+            computed.insert(case.name.clone(), regime::gate_band_values(&pipe, band).expect("band case runs"));
+        }
         let got = computed
             .get(&case.name)
             .unwrap_or_else(|| panic!("case {} not computed", case.name));
@@ -105,7 +110,7 @@ fn golden_values_reproduced() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 77, "every scalar across the 20 cases must be compared");
+    assert_eq!(checked, 80, "every scalar across the 21 cases must be compared");
 }
 
 #[test]
