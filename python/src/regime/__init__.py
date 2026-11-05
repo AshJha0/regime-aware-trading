@@ -12,6 +12,13 @@ from .backtest import (
     run_backtest,
     state_conditional_returns,
 )
+from .costs import (
+    CostAssumptions,
+    aum_at_sharpe_fraction,
+    daily_cost_fraction,
+    participation,
+    trade_cost,
+)
 from .evaluation import (
     BootstrapResult,
     BreakEven,
@@ -79,6 +86,11 @@ from .strategies import (
 )
 
 __all__ = [
+    "CostAssumptions",
+    "aum_at_sharpe_fraction",
+    "daily_cost_fraction",
+    "participation",
+    "trade_cost",
     "BootstrapResult",
     "BreakEven",
     "CombinedStream",
