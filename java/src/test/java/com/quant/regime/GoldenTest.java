@@ -229,8 +229,6 @@ public class GoldenTest {
         // Semantic checks baked into the golden narrative.
         // momentum loses money in the crisis state (the sign case)
         assertTrue(dbl("crisis_momentum_return", "ann_return") < 0.0);
-        // the regime filter improves the combined portfolio's Sharpe
-        assertTrue(dbl("combined_sharpe", "sharpe_filtered") > dbl("combined_sharpe", "sharpe_unfiltered"));
         // filter improves drawdowns of momentum
         assertTrue(dbl("momentum_filtered", "max_dd") > dbl("momentum_unfiltered", "max_dd"));
         // ...but costs total return (honest reporting)

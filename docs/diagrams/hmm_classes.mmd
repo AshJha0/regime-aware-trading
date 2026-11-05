@@ -75,6 +75,12 @@ classDiagram
     GaussianHMM --> HMMFitResult : returns
     strategies --> GaussianHMM : regime_gate refits
     strategies --> HMMParams : forward_step
+    class RegimeFilter {
+        +update(x)
+        +reset(alpha_prev)
+        +alpha()
+    }
+    RegimeFilter --> HMMParams : validated once
     backtest --> BacktestResult : returns
     pipeline --> GaussianHMM : full-sample fits
     pipeline --> strategies : positions + gate

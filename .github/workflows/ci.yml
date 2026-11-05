@@ -32,6 +32,8 @@ jobs:
             echo "::error::banned word found in tracked files"
             exit 1
           fi
+      - name: Fail if documented counts drift
+        run: python3 tools/check_docs.py
 
   python:
     name: python 3.11

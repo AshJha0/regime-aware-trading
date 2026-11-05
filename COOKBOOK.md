@@ -758,7 +758,7 @@ System.out.printf("crisis: %d days, ann ret %+.5f%n",
 
 ## 12. How do I verify my build against the golden values?
 
-Every language ships a golden test suite that compares all 20 cases /
+Every language ships a golden test suite that compares all 21 cases /
 80 scalars (`python -m pytest tests/test_golden.py`, the `Golden.*`
 GoogleTest cases, `cargo test --test golden_tests`, `GoldenTest`). This is
 the manual equivalent for one pinned number: the full-sample K=3
@@ -976,6 +976,78 @@ init.variances[2][0] = 1e-8;
 HmmFitResult res = hmm.fit(x, init);
 System.out.printf("converged=%b monotone=%b deadState=%d%n",
         res.converged(), res.monotone(), res.deadState());   // false true 2 (-1 means none)
+```
+
+---
+
+## 15. How do I run the regime filter online, one observation at a time?
+
+Fit once, build a `RegimeFilter`, then call `update` per observation. It
+validates the parameters once, and in C++ and Rust `update` allocates
+nothing. The result equals the batch filtered probabilities.
+
+**Python**
+
+```python
+from regime import GaussianHMM, RegimeFilter, load_dataset
+
+r = load_dataset("../data").index_returns[:600]
+hmm = GaussianHMM(3)
+hmm.fit(r)
+live = RegimeFilter(hmm.params)
+for x in r:
+    p = live.update(x)
+assert abs(p[0] - hmm.filtered_probabilities(r)[-1, 0]) < 1e-12
+print("P(state 0) now:", round(float(p[0]), 6))
+```
+
+**C++**
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <regime/hmm.hpp>
+#include <regime/pipeline.hpp>
+
+std::vector<double> r = regime::load_dataset("../data").index_returns;
+r.resize(600);
+regime::GaussianHMM hmm(3, /*tol=*/1e-8, /*max_iter=*/500, /*var_floor=*/1e-8);
+hmm.fit(regime::to_matrix(r));
+regime::RegimeFilter live(hmm.params());
+for (double x : r) live.update(x);
+std::cout << "P(state 0) now: " << live.alpha()[0] << "\n";
+```
+
+**Rust**
+
+```rust
+use regime::{load_dataset, GaussianHmm, Matrix, RegimeFilter};
+
+let r: Vec<f64> = load_dataset("../data")?.index_returns[..600].to_vec();
+let mut hmm = GaussianHmm::new(3, 1e-8, 500, 1e-8)?;
+hmm.fit(&Matrix::column(&r), None)?;
+let mut live = RegimeFilter::new(hmm.params().expect("fitted"), None)?;
+for x in &r {
+    live.update(&[*x])?;
+}
+println!("P(state 0) now: {:.6}", live.alpha()[0]);
+```
+
+**Java**
+
+```java
+import com.quant.regime.GaussianHmm;
+import com.quant.regime.Pipeline;
+import com.quant.regime.RegimeFilter;
+import java.nio.file.Path;
+import java.util.Arrays;
+
+double[] r = Arrays.copyOf(Pipeline.loadDataset(Path.of("../data")).indexReturns(), 600);
+GaussianHmm hmm = new GaussianHmm(3, 1e-8, 500, 1e-8);
+hmm.fit(r);
+RegimeFilter live = new RegimeFilter(hmm.params());
+for (double x : r) live.update(x);
+System.out.printf("P(state 0) now: %.6f%n", live.alpha()[0]);
 ```
 
 ---

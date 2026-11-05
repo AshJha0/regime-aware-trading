@@ -8,6 +8,7 @@ All notable changes to this project are recorded here. Versions follow
 - Replaced the README headline with post-warm-up evidence; added `regime.evaluation`, `tools/evaluate_gate.py` and `docs/GATE_EVALUATION.md`.
 - Added opt-in `gate_band` and `transition_floor`, `RegimeFilter` and filter benchmarks in all four languages; `regime_gate` now rejects returns <= -100 %.
 - Added CI for all four languages, `pyproject.toml`; goldens are now 21 cases / 80 scalars.
+- Rewrote the site, architecture notes, diagrams and demo takeaway to match the evaluation; added a cookbook recipe for `RegimeFilter` and `tools/check_docs.py`; removed the golden assertion that the gate raises Sharpe.
 - Known issue: one extreme print can capture the calm state.
 
 ### Added

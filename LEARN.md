@@ -578,14 +578,17 @@ The mechanism: both strategies make their money in calm/choppy states and
 lose in crisis, so scaling exposure by $P(\text{calm})$ cuts most of the
 crisis losses (crisis-state combined return improves from $-9.9\%$ to
 $-0.9\%$ annualized) while also cutting *some* good exposure — the gate
-is below 1 plenty of the time, and it reacts with a lag. Net effect,
-honestly reported: **total return falls** (7.07% → 4.88%), volatility and
+is below 1 plenty of the time, and it reacts with a lag. Net effect over
+the full sample: **total return falls** (7.07% → 4.88%), volatility and
 drawdown fall *faster*, so **risk-adjusted metrics improve** (Sharpe
-1.80 → 1.87, maxDD $-5.2\%$ → $-3.4\%$, Calmar 1.35 → 1.43). A regime
-filter buys risk reduction; it is not free performance. If your leverage
-is constrained by drawdown (as every real fund's is), risk-adjusted
-improvement can be re-levered into higher return — that is the actual
-economic argument for filtering.
+1.80 → 1.87, maxDD $-5.2\%$ → $-3.4\%$, Calmar 1.35 → 1.43). Those
+full-sample figures flatter the gate, because it is 1 for the first 503
+days. On the days it can affect, Sharpe falls from 1.49 to 1.35 at 5 bps,
+and a constant 60 % position matches the drawdown with no signal at all.
+The economic argument for filtering is that lower drawdown can be
+re-levered into return, but that needs a risk-adjusted gain to re-lever,
+and `docs/GATE_EVALUATION.md` finds none that a simple volatility rule
+lacks.
 
 Carry shows the trade-off starkest: its unfiltered Sharpe (1.58) barely
 changes filtered (1.49) but its drawdown halves — the filter converts a
@@ -650,6 +653,10 @@ re-read the past under future parameters.
   not beat a 21-day volatility rule on average, and it loses to the
   unfiltered book under fat tails. Treat figures in this guide as worked
   examples, not evidence of an edge.
+* **No-trade band.** `gate_band` holds the gate until it moves by more than
+  the band, which cuts the daily turnover described below. It is off by
+  default: a band of 0.3 looked good on the bundled path, but it is a tuned
+  knob tested on one seed.
 * **Costs and capacity.** The filter trades every day (the gate wiggles);
   in `"prob"` mode this is modest, but with expensive instruments the
   extra turnover eats the benefit. Golden turnover values exist precisely

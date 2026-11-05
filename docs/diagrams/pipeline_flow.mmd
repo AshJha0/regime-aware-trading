@@ -18,7 +18,7 @@ flowchart TD
     FX --> CAR["carry_positions<br/>rank diffs, top3/bottom3, 21d rebalance"]
     FX --> CRET["carry_total_returns<br/>spot + diff(t-1)/252"]
 
-    GATE --> APG["apply_gate: P_filt = gate * P"]
+    GATE --> APG["apply_gate: P_filt = gate * P<br/>(optional gate_band no-trade band)"]
     MOM --> APG
     CAR --> APG
 
@@ -32,6 +32,7 @@ flowchart TD
     BT --> CRISIS
     COMB --> CRISIS
 
-    BT --> OUT["demo report / golden.json<br/>20 cross-language cases, 77 scalars"]
+    BT --> OUT["demo report / golden.json<br/>21 cross-language cases, 80 scalars"]
     COMB --> OUT
     CRISIS --> OUT
+    OUT --> EVAL["tools/evaluate_gate.py<br/>baselines, bootstrap, seed sweep<br/>docs/GATE_EVALUATION.md"]

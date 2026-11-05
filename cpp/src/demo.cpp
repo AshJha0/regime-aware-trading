@@ -124,13 +124,13 @@ int main(int argc, char** argv) {
         const regime::Metrics& mu = pipe.combined.at("unfiltered").metrics;
         const regime::Metrics& mf = pipe.combined.at("filtered").metrics;
         std::printf("%s\n", kLine);
-        std::printf("Takeaway: momentum and carry both lose money in the high-vol crisis\n");
-        std::printf("regime; scaling by the filtered P(calm) improves the combined Sharpe\n");
-        std::printf("(%.2f -> %.2f) and maxDD (%+.2f%% -> %+.2f%%)\n", mu.sharpe, mf.sharpe,
+        std::printf("Takeaway: the figures below are full-sample and include 503 warm-up days\n");
+        std::printf("on which the gate is 1, so they are not evidence for the gate:\n");
+        std::printf("Sharpe (%.2f -> %.2f), maxDD (%+.2f%% -> %+.2f%%)\n", mu.sharpe, mf.sharpe,
                     100.0 * mu.max_dd, 100.0 * mf.max_dd);
-        std::printf("at the cost of total return (%+.2f%% -> %+.2f%%) — the filter\n",
+        std::printf("return (%+.2f%% -> %+.2f%%).\n",
                     100.0 * mu.ann_return, 100.0 * mf.ann_return);
-        std::printf("buys risk reduction, not free performance.\n");
+        std::printf("See docs/GATE_EVALUATION.md for the post-warm-up test against baselines.\n");
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "demo failed: %s\n", e.what());
