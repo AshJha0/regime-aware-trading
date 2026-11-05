@@ -698,7 +698,7 @@ re-read the past under future parameters.
 
 ---
 
-## 12. Interview-style Q&A
+## 12. Knowledge check Q&A
 
 **Q1. Why does the raw forward algorithm underflow, and what are the two
 standard fixes?**

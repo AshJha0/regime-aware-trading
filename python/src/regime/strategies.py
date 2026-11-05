@@ -113,7 +113,7 @@ def momentum_positions(
     if vol_target <= 0 or leverage_cap <= 0:
         raise ValueError("vol_target and leverage_cap must be > 0")
 
-    # Trailing cumulative return via cumulative log(1+r) differences.
+    # Trailing cumulative return as a ratio of cumulative growth (cumprod of 1+r).
     growth = np.cumprod(1.0 + r, axis=0)
     cumret = np.full((T, A), np.nan)
     cumret[lookback - 1] = growth[lookback - 1] - 1.0
