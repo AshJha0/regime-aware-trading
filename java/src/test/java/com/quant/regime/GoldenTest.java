@@ -68,11 +68,17 @@ public class GoldenTest {
                 "max_dd_unfiltered", pipe.combinedMetrics().get("unfiltered").maxDd(),
                 "max_dd_filtered", pipe.combinedMetrics().get("filtered").maxDd()));
         out.put("crisis_momentum_return",
-                Map.of("ann_return", pipe.crisis().get("momentum_unfiltered")[0].annReturn()));
+                Map.of("ann_return", pipe.crisis().get("momentum_unfiltered")[pipe.crisisLabel()].annReturn()));
         out.put("turnover_momentum",
                 Map.of("mean_turnover", mean(pipe.results().get("momentum_unfiltered").turnover())));
         out.put("turnover_carry",
                 Map.of("mean_turnover", mean(pipe.results().get("carry_unfiltered").turnover())));
+        double[] scale = pipe.portfolioScale();
+        out.put("portfolio_scale", Map.of(
+                "mean_scale", mean(scale),
+                "max_scale", java.util.Arrays.stream(scale).max().orElseThrow(),
+                "scale_t504", scale[504],
+                "scale_t1500", scale[1500]));
         return out;
     }
 
@@ -159,17 +165,18 @@ public class GoldenTest {
     @Test
     public void goldenFileHasExpectedCases() {
         List<?> cases = TestData.goldenCases();
-        assertEquals(22, cases.size());
+        assertEquals(23, cases.size());
         Set<String> names = new HashSet<>();
         for (Object c : cases) {
             names.add((String) ((Map<?, ?>) c).get("name"));
         }
-        assertEquals(22, names.size());
+        assertEquals(23, names.size());
         for (String required : new String[] {"hmm_k2_loglik", "hmm_k3_loglik", "hmm_k3_means",
                 "hmm_k3_stds", "hmm_k3_transmat", "hmm_k3_viterbi_counts", "hmm_k3_stationary",
                 "hmm_k3_smoothed_t500", "hmm_k3_smoothed_t1500", "viterbi_accuracy_vs_true",
                 "momentum_unfiltered", "momentum_filtered", "carry_unfiltered", "carry_filtered",
                 "combined_sharpe", "crisis_momentum_return", "turnover_momentum", "turnover_carry",
+                "portfolio_scale",
                 "carry_rerank_positions", "carry_rerank_backtest", "gate_band_0p3",
                 "calm_guard_injected"}) {
             assertTrue("missing golden case " + required, names.contains(required));
@@ -185,7 +192,7 @@ public class GoldenTest {
 
     @Test
     public void carryRerankPanelReallyReranks() {
-        // The bundled differentials never cross; the embedded panel must.
+        // The bundled basket rarely changes; the embedded panel must flip.
         Map<?, ?> rr = caseByName("carry_rerank_positions");
         double[][] panel = carryRerankPanel((Map<?, ?>) rr.get("inputs"));
         assertEquals(63, panel.length);
@@ -223,14 +230,12 @@ public class GoldenTest {
                 checked++;
             }
         }
-        assertEquals("every scalar across the 22 cases", 83, checked);
+        assertEquals("every scalar across the 23 cases", 87, checked);
     }
 
     @Test
     public void goldenSignCases() {
         // Semantic checks baked into the golden narrative.
-        // momentum loses money in the crisis state (the sign case)
-        assertTrue(dbl("crisis_momentum_return", "ann_return") < 0.0);
         // filter improves drawdowns of momentum
         assertTrue(dbl("momentum_filtered", "max_dd") > dbl("momentum_unfiltered", "max_dd"));
         // ...but costs total return (honest reporting)

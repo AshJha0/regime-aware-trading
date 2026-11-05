@@ -10,8 +10,9 @@
 /// breakdown.  The demo and the golden tests both call run_full_pipeline so
 /// they can never drift apart.
 ///
-/// Label conventions (pinned): HMM states are sorted by mean ascending, so on
-/// this data state 0 = crisis (lowest mean, highest vol).  The bundled true
+/// Label conventions (pinned): HMM states are sorted by mean ascending, so
+/// state 0 has the lowest mean; that need not be the crisis state, which is the
+/// highest-variance state (state 2 on this data).  The bundled true
 /// states use the generator's ordering (0 = calm-bull, 1 = choppy,
 /// 2 = crisis); the pinned volatility mapping of the full-sample K=3 fit
 /// (calm -> argmin variance, crisis -> argmax variance) aligns them for the
@@ -37,6 +38,7 @@ struct PipelineConfig {
     double var_floor{1e-8};
     int momentum_lookback{252};
     double vol_target{0.10};
+    double portfolio_vol_target{0.10};  ///< Vol target of the combined book (API_SPEC 3.5).
     double ewma_lambda{0.94};
     double leverage_cap{4.0};
     int carry_top_n{3};
@@ -82,12 +84,27 @@ struct PipelineResult {
     Matrix smoothed3;                    ///< Full-sample K=3 smoothed posteriors.
     std::vector<double> stationary3;     ///< Stationary distribution of the K=3 fit.
     double viterbi_accuracy{0.0};        ///< Viterbi vs mapped true states.
+    int crisis_label{0};                 ///< Highest-variance state of the K=3 fit.
     std::vector<double> gate;            ///< Walk-forward regime gate values.
     std::vector<std::size_t> guard_trips;  ///< Refit days the calm-state guard tripped.
+    std::vector<double> portfolio_scale;   ///< Portfolio vol scale per day (API_SPEC 3.5).
     std::map<std::string, BacktestResult> results;      ///< momentum/carry x un/filtered.
     std::map<std::string, CombinedResult> combined;     ///< "unfiltered", "filtered".
     std::map<std::string, std::vector<StateStats>> crisis;  ///< Per-strategy state table.
 };
+
+/// Both sleeves at the portfolio vol scale, before any gate (API_SPEC 3.5).
+struct ScaledBook {
+    Matrix momentum;             ///< Scaled momentum positions.
+    Matrix carry;                ///< Scaled carry positions.
+    Matrix carry_returns;        ///< Carry total returns.
+    std::vector<double> scale;   ///< The scale per day.
+};
+
+/// Build the scaled book.  The scale comes from the unscaled, ungated book at
+/// cfg.cost_bps, so every gate multiplies the same book and none is
+/// vol-targeted back up.
+ScaledBook scaled_book(const Dataset& ds, const PipelineConfig& cfg);
 
 /// The `gate_band_0p3` golden scalars (API_SPEC 5).
 struct GateBandValues {

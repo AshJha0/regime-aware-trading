@@ -91,10 +91,10 @@ r = load_dataset("../data").index_returns
 hmm = GaussianHMM(n_states=3, tol=1e-8, max_iter=500, var_floor=1e-8)
 res = hmm.fit(r)
 print(f"loglik {res.log_likelihood:.6f} in {res.n_iter} iters, converged={res.converged}")
-for k in range(3):                       # golden: means -0.003432, 0.000635, 0.001040
+for k in range(3):                       # golden: means -0.000158, 0.000536, 0.002654
     mu, sd = hmm.params.means[k, 0], np.sqrt(hmm.params.variances[k, 0])
     print(f"state {k}: ann mean {252*mu:+.1%}  ann vol {np.sqrt(252)*sd:.1%}")
-# loglik 6886.449837 (golden hmm_k3_loglik)
+# loglik 6643.076654 (golden hmm_k3_loglik)
 ```
 
 **C++**
@@ -109,7 +109,7 @@ const regime::Matrix r = regime::to_matrix(regime::load_dataset("../data").index
 regime::GaussianHMM hmm(3, /*tol=*/1e-8, /*max_iter=*/500, /*var_floor=*/1e-8);
 const regime::HMMFitResult res = hmm.fit(r);
 std::cout << "loglik " << res.log_likelihood << " in " << res.n_iter
-          << " iters, converged=" << res.converged << "\n";       // 6886.45, 63, 1
+          << " iters, converged=" << res.converged << "\n";       // 6643.08, 71, 1
 for (std::size_t k = 0; k < 3; ++k)
     std::cout << "state " << k << ": mean " << hmm.params().means(k, 0)
               << " std " << std::sqrt(hmm.params().variances(k, 0)) << "\n";
@@ -163,7 +163,7 @@ for k in (2, 3):
     hmm.fit(r)
     print(f"K={k}  loglik {hmm.fit_result.log_likelihood:12.4f}"
           f"  AIC {hmm.aic(r):12.4f}  BIC {hmm.bic(r):12.4f}")
-# K=2 loglik 6831.0255  |  K=3 loglik 6886.4498 — both AIC and BIC prefer K=3
+# K=2 loglik 6612.4532  |  K=3 loglik 6643.0767 — both AIC and BIC prefer K=3
 ```
 
 **C++**
@@ -294,7 +294,7 @@ hmm = GaussianHMM(3)
 hmm.fit(r)
 filt = hmm.filtered_probabilities(r)     # (T, 3) — causal
 smth = hmm.smoothed_probabilities(r)     # (T, 3) — non-causal
-print("day 500 smoothed:", smth[500])    # golden: [3.86e-06, 0.99866, 0.00134]
+print("day 500 smoothed:", smth[500])    # golden: [0.15071, 0.84761, 0.00168]
 print("day 500 filtered:", filt[500])
 ```
 
@@ -310,7 +310,7 @@ regime::GaussianHMM hmm(3);
 hmm.fit(r);
 const regime::Matrix filt = hmm.filtered_probabilities(r);   // T x 3, causal
 const regime::Matrix smth = hmm.smoothed_probabilities(r);   // T x 3, non-causal
-std::cout << "day 500 smoothed p1 = " << smth(500, 1)          // 0.9986576
+std::cout << "day 500 smoothed p1 = " << smth(500, 1)          // 0.8476064
           << ", filtered p1 = " << filt(500, 1) << "\n";
 ```
 
@@ -340,7 +340,7 @@ hmm.fit(r);
 double[][] smth = hmm.smoothedProbabilities(r);
 double[][] filt = hmm.filteredProbabilities(r);
 System.out.printf("day 500 smoothed p1 = %.7f, filtered p1 = %.7f%n",
-        smth[500][1], filt[500][1]);                              // 0.9986576, ...
+        smth[500][1], filt[500][1]);                              // 0.8476064, ...
 ```
 
 ---
@@ -355,7 +355,7 @@ from regime import GaussianHMM, load_dataset
 r = load_dataset("../data").index_returns
 hmm = GaussianHMM(3)
 hmm.fit(r)
-pi = hmm.stationary_distribution()       # golden: [0.05658, 0.67674, 0.26667]
+pi = hmm.stationary_distribution()       # golden: [0.24551, 0.62042, 0.13407]
 for k in range(3):
     dur = 1.0 / (1.0 - hmm.params.transmat[k, k])
     print(f"state {k}: long-run share {pi[k]:.4f}, expected duration {dur:.1f} days")
@@ -472,9 +472,8 @@ System.out.println("day-300 book, asset 0: " + pos[300][0]);
 
 Rank by rate differential at day indices 0, 21, 42, ...; the traded
 return adds the previous day's accrual (`spot[t] + diff[t-1]/252`). On
-the bundled data the six differentials never change rank order, so the
-day-0 book is held for the whole sample (turnover `2/2000`); the
-re-ranking logic is exercised by the synthetic `carry_rerank_*` golden
+the bundled data the basket changes on only 2 days (798 and 819); the
+re-ranking logic is exercised directly by the synthetic `carry_rerank_*` golden
 cases instead.
 
 **Python**
@@ -547,7 +546,7 @@ pos = momentum_positions(ds.trend_returns)
 res = run_backtest(pos, ds.trend_returns, cost_bps=5.0, dates=ds.dates)
 m = res.metrics
 print(f"ann ret {m['ann_return']:+.2%}  Sharpe {m['sharpe']:.4f}  maxDD {m['max_dd']:+.2%}")
-# ann ret +3.38%  Sharpe 0.8149  maxDD -10.48%  (golden momentum_unfiltered)
+# ann ret +4.06%  Sharpe 0.9720  maxDD -9.26%  (before the portfolio scale)
 ```
 
 **C++**
@@ -563,7 +562,7 @@ const regime::Matrix pos = regime::momentum_positions(ds.trend_returns);
 const regime::BacktestResult res =
     regime::run_backtest(pos, ds.trend_returns, /*cost_bps=*/5.0, &ds.dates);
 std::cout << "ann ret " << res.metrics.ann_return << "  Sharpe " << res.metrics.sharpe
-          << "  maxDD " << res.metrics.max_dd << "\n";           // 0.0337758 0.8148843 -0.1048329
+          << "  maxDD " << res.metrics.max_dd << "\n";           // 0.0406252 0.9720241 -0.0926142
 ```
 
 **Rust**
@@ -576,7 +575,7 @@ let pos = momentum_positions(&ds.trend_returns, 252, 0.10, 0.94, 4.0)?;
 let res = run_backtest(&pos, &ds.trend_returns, 5.0, Some(&ds.dates))?;
 let m = &res.metrics;
 println!("ann ret {:+.4}  Sharpe {:.7}  maxDD {:+.4}", m.ann_return, m.sharpe, m.max_dd);
-// Sharpe 0.8148843 (golden momentum_unfiltered)
+// Sharpe 0.9720241 (before the portfolio scale)
 ```
 
 **Java**
@@ -592,7 +591,7 @@ double[][] pos = Strategies.momentumPositions(ds.trendReturns(), 252, 0.10, 0.94
 Backtest.Result res = Backtest.run(pos, ds.trendReturns(), 5.0, ds.dates());
 Backtest.Metrics m = res.metrics();
 System.out.printf("ann ret %+.4f  Sharpe %.7f  maxDD %+.4f%n",
-        m.annReturn(), m.sharpe(), m.maxDd());                    // Sharpe 0.8148843
+        m.annReturn(), m.sharpe(), m.maxDd());                    // Sharpe 0.9720241
 ```
 
 ---
@@ -615,7 +614,7 @@ gate, models = regime_gate(ds.index_returns, n_states=3,
                            train_min_days=504, refit_days=63, mode="prob")
 pos = momentum_positions(ds.trend_returns)
 res = run_backtest(apply_gate(pos, gate), ds.trend_returns, 5.0, ds.dates)
-print(f"filtered Sharpe {res.metrics['sharpe']:.4f}")   # 1.0402 vs 0.8149 unfiltered
+print(f"filtered Sharpe {res.metrics['sharpe']:.4f}")   # 0.8066 vs 0.9720 unfiltered
 print(f"{len(models)} walk-forward fits")
 ```
 
@@ -634,7 +633,7 @@ const regime::RegimeGateResult g = regime::regime_gate(
 const regime::Matrix pos = regime::apply_gate(regime::momentum_positions(ds.trend_returns), g.gate);
 const regime::BacktestResult res = regime::run_backtest(pos, ds.trend_returns, 5.0, &ds.dates);
 std::cout << "filtered Sharpe " << res.metrics.sharpe << " from " << g.models.size()
-          << " walk-forward fits\n";                              // 1.040234, 24
+          << " walk-forward fits\n";                              // 0.806598, 24
 ```
 
 **Rust**
@@ -647,7 +646,7 @@ let (gate, models) = regime_gate(&ds.index_returns, 3, 504, 63, "prob", 0.5, 1e-
 let pos = apply_gate(&momentum_positions(&ds.trend_returns, 252, 0.10, 0.94, 4.0)?, &gate)?;
 let res = run_backtest(&pos, &ds.trend_returns, 5.0, Some(&ds.dates))?;
 println!("filtered Sharpe {:.7} from {} walk-forward fits", res.metrics.sharpe, models.len());
-// 1.0402340, 24
+// 0.8065977, 24
 ```
 
 **Java**
@@ -665,7 +664,7 @@ double[][] pos = Strategies.applyGate(
         Strategies.momentumPositions(ds.trendReturns(), 252, 0.10, 0.94, 4.0), g.gate());
 Backtest.Result res = Backtest.run(pos, ds.trendReturns(), 5.0, ds.dates());
 System.out.printf("filtered Sharpe %.7f from %d walk-forward fits%n",
-        res.metrics().sharpe(), g.models().size());               // 1.0402340, 24
+        res.metrics().sharpe(), g.models().size());               // 0.8065977, 24
 ```
 
 ---
@@ -690,7 +689,7 @@ res = run_backtest(momentum_positions(ds.trend_returns), ds.trend_returns, 5.0)
 table = state_conditional_returns(res.net_returns, states, 3)
 for k, row in table.items():
     print(f"state {k}: {row['n_days']:4d} days  ann ret {row['ann_return']:+.2%}")
-# state 0 (crisis): ann ret -8.77%  (golden crisis_momentum_return, sign case)
+# state 2 (crisis, highest variance): ann ret +7.37%  (before the portfolio scale)
 ```
 
 **C++**
@@ -711,8 +710,8 @@ const regime::BacktestResult res =
     regime::run_backtest(regime::momentum_positions(ds.trend_returns), ds.trend_returns, 5.0);
 const std::vector<regime::StateStats> table =
     regime::state_conditional_returns(res.net_returns, states, 3);
-std::cout << "crisis: " << table[0].n_days << " days, ann ret " << table[0].ann_return
-          << "\n";                                                // 99 days, -0.0877060
+std::cout << "crisis: " << table[2].n_days << " days, ann ret " << table[2].ann_return
+          << "\n";                                                // 226 days, 0.0736696
 ```
 
 **Rust**
@@ -730,7 +729,7 @@ let states = hmm.viterbi(&r)?;
 let pos = momentum_positions(&ds.trend_returns, 252, 0.10, 0.94, 4.0)?;
 let res = run_backtest(&pos, &ds.trend_returns, 5.0, None)?;
 let table = state_conditional_returns(&res.net_returns, &states, 3)?;
-println!("crisis: {} days, ann ret {:+.5}", table[0].n_days, table[0].ann_return); // 99, -0.08771
+println!("crisis: {} days, ann ret {:+.5}", table[2].n_days, table[2].ann_return); // 226, +0.07367
 ```
 
 **Java**
@@ -751,18 +750,18 @@ Backtest.Result res = Backtest.run(
         ds.trendReturns(), 5.0, null);
 Backtest.StateStats[] table = Backtest.stateConditionalReturns(res.netReturns(), states, 3);
 System.out.printf("crisis: %d days, ann ret %+.5f%n",
-        table[0].nDays(), table[0].annReturn());                  // 99, -0.08771
+        table[2].nDays(), table[2].annReturn());                  // 226, +0.07367
 ```
 
 ---
 
 ## 12. How do I verify my build against the golden values?
 
-Every language ships a golden test suite that compares all 22 cases /
-83 scalars (`python -m pytest tests/test_golden.py`, the `Golden.*`
+Every language ships a golden test suite that compares all 23 cases /
+87 scalars (`python -m pytest tests/test_golden.py`, the `Golden.*`
 GoogleTest cases, `cargo test --test golden_tests`, `GoldenTest`). This is
 the manual equivalent for one pinned number: the full-sample K=3
-log-likelihood `6886.449836599692` (tolerance 1e-6). Python reads the
+log-likelihood `6643.076654247344` (tolerance 1e-6). Python reads the
 file; the ports compare against the pinned constant (their JSON readers
 are test-tree helpers, not library API).
 
@@ -790,7 +789,7 @@ print(f"K=3 loglik OK: {got:.6f}")
 #include <regime/pipeline.hpp>
 
 const regime::PipelineResult pipe = regime::run_full_pipeline("../data");
-const double want = 6886.449836599692;              // golden hmm_k3_loglik, tol 1e-6
+const double want = 6643.076654247344;              // golden hmm_k3_loglik, tol 1e-6
 if (std::abs(pipe.fit3.log_likelihood - want) > 1e-6)
     throw std::runtime_error("golden mismatch");
 std::cout << "K=3 loglik OK: " << pipe.fit3.log_likelihood << "\n";
@@ -803,7 +802,7 @@ use regime::{golden_values, run_full_pipeline};
 
 let pipe = run_full_pipeline("../data", None, None)?;
 let got = golden_values(&pipe)["hmm_k3_loglik"]["loglik"];
-let want = 6886.449836599692; // golden hmm_k3_loglik, tol 1e-6
+let want = 6643.076654247344; // golden hmm_k3_loglik, tol 1e-6
 assert!((got - want).abs() <= 1e-6, "golden mismatch: {got} vs {want}");
 println!("K=3 loglik OK: {got:.6}");
 ```
@@ -815,7 +814,7 @@ import com.quant.regime.Pipeline;
 import java.nio.file.Path;
 
 Pipeline.Result pipe = Pipeline.runFullPipeline(Path.of("../data"));
-double want = 6886.449836599692;                    // golden hmm_k3_loglik, tol 1e-6
+double want = 6643.076654247344;                    // golden hmm_k3_loglik, tol 1e-6
 if (Math.abs(pipe.fit3().logLikelihood() - want) > 1e-6)
     throw new IllegalStateException("golden mismatch");
 System.out.printf("K=3 loglik OK: %.6f%n", pipe.fit3().logLikelihood());

@@ -10,8 +10,8 @@ from regime import golden_cases
 
 def test_golden_file_has_expected_cases(golden):
     names = [c["name"] for c in golden["cases"]]
-    assert len(names) == 22
-    assert len(set(names)) == 22
+    assert len(names) == 23
+    assert len(set(names)) == 23
     for required in (
         "hmm_k2_loglik",
         "hmm_k3_loglik",
@@ -31,6 +31,7 @@ def test_golden_file_has_expected_cases(golden):
         "crisis_momentum_return",
         "turnover_momentum",
         "turnover_carry",
+        "portfolio_scale",
         "carry_rerank_positions",
         "carry_rerank_backtest",
         "gate_band_0p3",
@@ -63,14 +64,12 @@ def test_golden_values_reproduced(golden, pipeline_full):
             else:
                 assert value == pytest.approx(expect, abs=tol), f"{case['name']}:{key}"
             checked += 1
-    assert checked == 83  # every scalar across the 22 cases
+    assert checked == 87  # every scalar across the 23 cases
 
 
 def test_golden_sign_cases(golden):
     """Semantic checks baked into the golden narrative."""
     by_name = {c["name"]: c for c in golden["cases"]}
-    # momentum loses money in the crisis state (the sign case)
-    assert by_name["crisis_momentum_return"]["expect"]["ann_return"] < 0.0
     cs = by_name["combined_sharpe"]["expect"]
     # filter improves drawdowns of momentum
     assert (

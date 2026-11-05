@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -157,7 +158,8 @@ double computed_value(const std::string& case_name, const std::string& key,
         if (key == "first_trip_day") return v.first_trip_day;
     }
     if (case_name == "crisis_momentum_return")
-        return pipe.crisis.at("momentum_unfiltered")[0].ann_return;
+        return pipe.crisis.at("momentum_unfiltered")[static_cast<std::size_t>(pipe.crisis_label)]
+            .ann_return;
     if (case_name == "turnover_momentum" || case_name == "turnover_carry") {
         const std::string res_name =
             case_name == "turnover_momentum" ? "momentum_unfiltered" : "carry_unfiltered";
@@ -166,6 +168,18 @@ double computed_value(const std::string& case_name, const std::string& key,
         for (double x : to) mean += x;
         return mean / static_cast<double>(to.size());
     }
+    if (case_name == "portfolio_scale") {
+        const auto& s = pipe.portfolio_scale;
+        if (key == "scale_t504") return s[504];
+        if (key == "scale_t1500") return s[1500];
+        double sum = 0.0, top = s[0];
+        for (double x : s) {
+            sum += x;
+            top = std::max(top, x);
+        }
+        if (key == "mean_scale") return sum / static_cast<double>(s.size());
+        if (key == "max_scale") return top;
+    }
     throw std::runtime_error("unhandled golden case/key: " + case_name + "/" + key);
 }
 
@@ -173,7 +187,7 @@ double computed_value(const std::string& case_name, const std::string& key,
 
 TEST(Golden, AllCasesMatchWithinTolerance) {
     const auto& cases = golden().at("cases").arr;
-    ASSERT_EQ(cases.size(), 22u);
+    ASSERT_EQ(cases.size(), 23u);
     int checked = 0;
     for (const auto& c : cases) {
         const std::string name = c.at("name").string();
@@ -188,11 +202,11 @@ TEST(Golden, AllCasesMatchWithinTolerance) {
             ++checked;
         }
     }
-    EXPECT_EQ(checked, 83);  // every scalar across the 22 cases
+    EXPECT_EQ(checked, 87);  // every scalar across the 23 cases
 }
 
 TEST(Golden, CarryRerankPanelReallyReranks) {
-    // The bundled differentials never cross; the embedded panel must.
+    // The bundled basket rarely changes; the embedded panel must flip.
     const auto& cases = golden().at("cases").arr;
     const mini_json::Value* rr = nullptr;
     for (const auto& c : cases)
@@ -225,8 +239,6 @@ TEST(Golden, ShorterRefitWindowAlsoRuns) {
 
 TEST(Golden, SemanticInvariants) {
     const regime::PipelineResult& pipe = full_pipeline();
-    // Crisis-state momentum return is negative (the sign case).
-    EXPECT_LT(pipe.crisis.at("momentum_unfiltered")[0].ann_return, 0.0);
     // The filter shrinks momentum drawdown at the cost of total return.
     EXPECT_GT(pipe.results.at("momentum_filtered").metrics.max_dd,
               pipe.results.at("momentum_unfiltered").metrics.max_dd);

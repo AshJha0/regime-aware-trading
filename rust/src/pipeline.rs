@@ -7,7 +7,8 @@
 //! [`run_full_pipeline`] so they can never drift apart.
 //!
 //! Label conventions (pinned): HMM states are sorted by mean ascending, so
-//! on this data state 0 = crisis (lowest mean, highest vol).  The bundled
+//! state 0 has the lowest mean; that need not be the crisis state, which is
+//! the highest-variance state (state 2 on this data).  The bundled
 //! true states use the generator's ordering (0 = calm-bull, 1 = choppy,
 //! 2 = crisis); the pinned mapping goes through the state volatilities
 //! (calm -> argmin variance, crisis -> argmax variance, choppy -> the rest).
@@ -27,7 +28,7 @@ use crate::hmm::{GaussianHmm, HmmFitResult};
 use crate::matrix::Matrix;
 use crate::strategies::{
     apply_gate, apply_gate_band, carry_positions, carry_total_returns, momentum_positions,
-    regime_gate_report, GateOptions,
+    portfolio_scale, regime_gate_report, GateOptions,
 };
 
 /// Pinned strategy/backtest configuration (`data/config.json`).
@@ -45,6 +46,8 @@ pub struct Config {
     pub momentum_lookback: usize,
     /// Annualized per-asset vol target.
     pub vol_target: f64,
+    /// Annualized vol target of the combined book (API_SPEC 3.5).
+    pub portfolio_vol_target: f64,
     /// EWMA decay for the vol estimate.
     pub ewma_lambda: f64,
     /// Per-asset leverage cap.
@@ -146,8 +149,12 @@ pub struct PipelineOutput {
     pub stationary3: Vec<f64>,
     /// Fraction of days where Viterbi matches the mapped true state.
     pub viterbi_accuracy: f64,
+    /// Highest-variance state of the K=3 fit (API_SPEC 2.2).
+    pub crisis_label: usize,
     /// Walk-forward gate values, length `T`.
     pub gate: Vec<f64>,
+    /// Portfolio vol scale per day (API_SPEC 3.5), length `T`.
+    pub portfolio_scale: Vec<f64>,
     /// Number of walk-forward refits.
     pub n_gate_models: usize,
     /// Refit days on which the calm-state guard tripped.
@@ -205,6 +212,58 @@ fn parse_csv(path: &Path) -> Result<(Vec<Date>, Vec<String>, Matrix)> {
     let rows = dates.len();
     let matrix = Matrix::from_vec(rows, names.len(), data)?;
     Ok((dates, names, matrix))
+}
+
+/// Both sleeves at the portfolio vol scale, before any gate (API_SPEC 3.5).
+#[derive(Debug, Clone)]
+pub struct ScaledBook {
+    /// Scaled momentum positions.
+    pub momentum: Matrix,
+    /// Scaled carry positions.
+    pub carry: Matrix,
+    /// Carry total returns.
+    pub carry_returns: Matrix,
+    /// The scale per day.
+    pub scale: Vec<f64>,
+}
+
+/// Build the scaled book.  The scale comes from the unscaled, ungated book at
+/// `cfg.cost_bps`, so every gate multiplies the same book and none is
+/// vol-targeted back up.
+///
+/// # Errors
+/// Any strategy or backtest validation failure.
+pub fn scaled_book(ds: &Dataset, cfg: &Config) -> Result<ScaledBook> {
+    let mom = momentum_positions(
+        &ds.trend_returns,
+        cfg.momentum_lookback,
+        cfg.vol_target,
+        cfg.ewma_lambda,
+        cfg.leverage_cap,
+    )?;
+    let carry = carry_positions(&ds.fx_rate_diffs, cfg.carry_top_n, cfg.carry_bottom_n, cfg.rebalance_days)?;
+    let carry_returns = carry_total_returns(&ds.fx_spot_returns, &ds.fx_rate_diffs)?;
+    let raw_mom = run_backtest(&mom, &ds.trend_returns, cfg.cost_bps, None)?;
+    let raw_carry = run_backtest(&carry, &carry_returns, cfg.cost_bps, None)?;
+    let raw: Vec<f64> = raw_mom
+        .net_returns
+        .iter()
+        .zip(&raw_carry.net_returns)
+        .map(|(x, y)| 0.5 * x + 0.5 * y)
+        .collect();
+    let scale = portfolio_scale(
+        &raw,
+        cfg.portfolio_vol_target,
+        cfg.ewma_lambda,
+        cfg.leverage_cap,
+        cfg.momentum_lookback,
+    )?;
+    Ok(ScaledBook {
+        momentum: apply_gate(&mom, &scale)?,
+        carry: apply_gate(&carry, &scale)?,
+        carry_returns,
+        scale,
+    })
 }
 
 /// Load the bundled CSVs and config from `data_dir`.
@@ -357,26 +416,14 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let cost = cfg.cost_bps;
     let dates = Some(dataset.dates.as_slice());
 
-    let mom_pos = momentum_positions(
-        &dataset.trend_returns,
-        cfg.momentum_lookback,
-        cfg.vol_target,
-        cfg.ewma_lambda,
-        cfg.leverage_cap,
-    )?;
-    let carry_pos = carry_positions(
-        &dataset.fx_rate_diffs,
-        cfg.carry_top_n,
-        cfg.carry_bottom_n,
-        cfg.rebalance_days,
-    )?;
-    let carry_rets = carry_total_returns(&dataset.fx_spot_returns, &dataset.fx_rate_diffs)?;
+    let book = scaled_book(&dataset, &cfg)?;
+    let (mom_pos, carry_pos, carry_rets) = (&book.momentum, &book.carry, &book.carry_returns);
 
-    let momentum_unfiltered = run_backtest(&mom_pos, &dataset.trend_returns, cost, dates)?;
+    let momentum_unfiltered = run_backtest(mom_pos, &dataset.trend_returns, cost, dates)?;
     let momentum_filtered =
-        run_backtest(&apply_gate(&mom_pos, &gate)?, &dataset.trend_returns, cost, dates)?;
-    let carry_unfiltered = run_backtest(&carry_pos, &carry_rets, cost, dates)?;
-    let carry_filtered = run_backtest(&apply_gate(&carry_pos, &gate)?, &carry_rets, cost, dates)?;
+        run_backtest(&apply_gate(mom_pos, &gate)?, &dataset.trend_returns, cost, dates)?;
+    let carry_unfiltered = run_backtest(carry_pos, carry_rets, cost, dates)?;
+    let carry_filtered = run_backtest(&apply_gate(carry_pos, &gate)?, carry_rets, cost, dates)?;
 
     // Combined portfolio: 50/50 in each strategy's net return stream.
     let combine = |a: &BacktestResult, b: &BacktestResult| -> Result<CombinedLeg> {
@@ -393,7 +440,7 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
     let combined_filtered = combine(&momentum_filtered, &carry_filtered)?;
 
     // Crisis table: attribute daily strategy returns to the full-sample
-    // K=3 Viterbi state (state 0 = crisis on this data); the table has k3
+    // K=3 Viterbi state (crisis_label = highest variance); the table has k3
     // rows regardless of the gate's n_states.
     let crisis = CrisisTables {
         momentum_unfiltered: state_conditional_returns(&momentum_unfiltered.net_returns, &viterbi3, k3)?,
@@ -415,7 +462,9 @@ pub fn run_full_pipeline<P: AsRef<Path>>(
         smoothed3,
         stationary3,
         viterbi_accuracy,
+        crisis_label,
         gate,
+        portfolio_scale: book.scale,
         n_gate_models: gate_models.len(),
         guard_trips,
         momentum_unfiltered,
@@ -498,18 +547,9 @@ pub fn gate_band_values(pipe: &PipelineOutput, band: f64) -> Result<BTreeMap<Str
     let cfg = &pipe.config;
     let dates = Some(ds.dates.as_slice());
     let gate = apply_gate_band(&pipe.gate, band)?;
-    let mom_pos = momentum_positions(
-        &ds.trend_returns,
-        cfg.momentum_lookback,
-        cfg.vol_target,
-        cfg.ewma_lambda,
-        cfg.leverage_cap,
-    )?;
-    let carry_pos =
-        carry_positions(&ds.fx_rate_diffs, cfg.carry_top_n, cfg.carry_bottom_n, cfg.rebalance_days)?;
-    let carry_rets = carry_total_returns(&ds.fx_spot_returns, &ds.fx_rate_diffs)?;
-    let mom = run_backtest(&apply_gate(&mom_pos, &gate)?, &ds.trend_returns, cfg.cost_bps, dates)?;
-    let carry = run_backtest(&apply_gate(&carry_pos, &gate)?, &carry_rets, cfg.cost_bps, dates)?;
+    let book = scaled_book(ds, cfg)?;
+    let mom = run_backtest(&apply_gate(&book.momentum, &gate)?, &ds.trend_returns, cfg.cost_bps, dates)?;
+    let carry = run_backtest(&apply_gate(&book.carry, &gate)?, &book.carry_returns, cfg.cost_bps, dates)?;
     let net: Vec<f64> =
         mom.net_returns.iter().zip(&carry.net_returns).map(|(x, y)| 0.5 * x + 0.5 * y).collect();
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
@@ -582,7 +622,7 @@ pub fn golden_values(pipe: &PipelineOutput) -> BTreeMap<String, BTreeMap<String,
     );
     case(
         "crisis_momentum_return",
-        vec![("ann_return".into(), pipe.crisis.momentum_unfiltered[0].ann_return)],
+        vec![("ann_return".into(), pipe.crisis.momentum_unfiltered[pipe.crisis_label].ann_return)],
     );
     let mean_of = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
     case(
@@ -592,6 +632,16 @@ pub fn golden_values(pipe: &PipelineOutput) -> BTreeMap<String, BTreeMap<String,
     case(
         "turnover_carry",
         vec![("mean_turnover".into(), mean_of(&pipe.carry_unfiltered.turnover))],
+    );
+    let scale = &pipe.portfolio_scale;
+    case(
+        "portfolio_scale",
+        vec![
+            ("mean_scale".into(), mean_of(scale)),
+            ("max_scale".into(), scale.iter().cloned().fold(f64::NEG_INFINITY, f64::max)),
+            ("scale_t504".into(), scale[504]),
+            ("scale_t1500".into(), scale[1500]),
+        ],
     );
     out
 }

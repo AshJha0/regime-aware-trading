@@ -5,6 +5,7 @@
   "var_floor": 1e-08,
   "momentum_lookback": 252,
   "vol_target": 0.1,
+  "portfolio_vol_target": 0.1,
   "ewma_lambda": 0.94,
   "leverage_cap": 4.0,
   "carry_top_n": 3,

@@ -5,7 +5,7 @@ reference `python/src/regime`, C++ `regime::`, Rust crate `regime`, Java
 `com.quant.regime`). Anything pinned here must agree across languages to
 the golden tolerances in `data/golden/golden.json`. All computations are
 double precision, deterministic, and **RNG-free** (the only RNG in library
-code is the seeded data generator `data/generate_data.py`, SEED = 83; test
+code is the seeded data generator `data/generate_data.py`, SEED = 19; test
 fixtures may draw their own seeded random inputs).
 
 ---
@@ -89,7 +89,7 @@ Walk-forward refits (section 3.3) **warm-start** from the previous fitted
 
 **Warm-start transition floor** (`transition_floor`, default 0, off). EM
 multiplies the old `A_ij` into the new one, so an entry that reached zero
-stays there and a near-zero entry (1e-184 on the bundled refits) cannot
+stays there and a near-zero entry (some reach exactly 0 on the bundled refits) cannot
 recover in any useful number of iterations. With `f > 0`, a warm start
 replaces `A` before EM by
 
@@ -293,8 +293,10 @@ consecutive 21-day blocks and **drops the trailing partial block**
 Day-t net return is attributed to the day-t **full-sample K=3 Viterbi
 state** of the market index. Per state: `n_days`,
 `ann_return = 252 * mean`, `ann_vol = sqrt(252) * std(ddof=0)`, `sharpe`.
-Crisis = state 0 (lowest mean; also the highest-variance state on the
-bundled data), calm-bull = the lowest-variance state. The table always
+Crisis = the highest-variance state of that fit (`crisis_label`), calm-bull =
+the lowest-variance state, as in the section 4 mapping. Labels sort by mean,
+so crisis is not always state 0: on the bundled data it is state 2, whose
+sampled mean is the highest of the three, and state 0 is the choppy state. The table always
 has 3 rows (the K of that fit), whatever `n_states` the walk-forward gate
 uses. `state_conditional_returns(net, states, K)` requires `K >= 1`,
 finite `net`, and every label in `[0, K)` — labels are never silently
@@ -412,20 +414,21 @@ re-raises the same error type with the day index prepended
   two-part return and drops the days, so use the report form with the guard on.
 
   Measured on the bundled data with `m = 0.01` (mean gate from `t0` on,
-  clean 0.598, unguarded 0.276 at t=1000 and 0.126 at t=700):
+  clean 0.624, unguarded 0.145 at t=1000 and 0.093 at t=700):
 
   | injected return | guard on | trips of 24 | days more than 0.25 from clean |
   |---|---|---|---|
-  | -30 % at t=1000 | 0.617 | 1 | 15 |
-  | +50 % at t=1000 | 0.636 | 2 | 86 |
-  | -30 % at t=700 | 0.620 | 5 | 15 |
+  | -30 % at t=1000 | 0.657 | 5 | 20 |
+  | +50 % at t=1000 | 0.630 | 16 | 0 |
+  | -30 % at t=700 | 0.672 | 8 | 90 |
 
-  The clean run never trips. Results barely moved for `c` in {6, 8, 12}.
-  Selection without the clipped refit gave 0.697: the outlier still used up
-  one of the K states. The guard narrows the damage and does not remove it:
-  the mean stays 0.02 to 0.04 high and single days can still differ widely,
-  in the +50 % case as late as t=1902. `m = 0.01` is a guard value
-  checked on this one sample and one DGP, not a tuned or general setting.
+  The clean run never trips. On the earlier seed-83 data, results barely
+  moved for `c` in {6, 8, 12}, and selection without the clipped refit left
+  the mean further from clean: the outlier still used up one of the K states.
+  The guard narrows the damage and does not remove it: the mean stays 0.01 to
+  0.05 high and single days can still differ widely, as late as t=1668.
+  `m = 0.01` is a guard value checked on two samples of one DGP, not a tuned
+  or general setting.
 * **Gate value**: `p_calm(t) = P(s_t = k* | r_0..r_t)` — the **filtered**
   probability under the current model. At a refit day it comes from a
   full scaled forward pass over `r[0..t]`; between refits it is advanced
@@ -448,25 +451,93 @@ re-raises the same error type with the day index prepended
   language, and `regime_gate(..., gate_band)` returns its output (the
   models are unaffected). Rust passes both options through
   `regime_gate_with(..., GateOptions)`. On the bundled data a band of 0.3
-  takes filtered carry turnover from 18.4 to 6.7 per year, but the value
-  was chosen by looking at this sample: it is exploratory, not a default.
+  takes filtered carry turnover from 83.2 to 45.7 per year (the portfolio
+  scale of 3.5 trades every day, so the band cannot remove all of it), but
+  the value was chosen by looking at an earlier sample: it is exploratory, not
+  a default.
 * **Application**: `P_filtered[t, a] = gate[t] * P[t, a]` (both are day-t
-  decisions; the accounting of section 2 then applies them to day t+1).
+  decisions; the accounting of section 2 then applies them to day t+1). `P`
+  here is the book after the portfolio scale of 3.5.
 
 ### 3.4 Combined portfolio
 
 `net_combined[t] = 0.5 * net_momentum[t] + 0.5 * net_carry[t]` (each leg
 already net of its own costs), same for the filtered variants. Metrics per
-section 2.1.
+section 2.1. Both legs carry the scale of 3.5.
+
+### 3.5 Portfolio vol target (pinned)
+
+`vol_target` (3.1) sizes each asset alone, so the diversified book runs well
+under it: about 4 % a year against a stated 10 %. Config
+`portfolio_vol_target = 0.10` sets the level of the combined book with one
+scale shared by both sleeves.
+
+Let `Pm[t]`, `Pc[t]` be the positions of 3.1 and 3.2 and `u[t]` the combined
+net return of those unscaled, ungated positions at `cost_bps`:
+
+```
+u[t]  = 0.5 * net(Pm)[t] + 0.5 * net(Pc)[t]
+s     = momentum_lookback                 # first day both sleeves earn
+n     = PORTFOLIO_VOL_INIT_DAYS = 21
+scale[t] = 1                              for t < s + n - 1
+sig2[s+n-1] = mean(u[s .. s+n-1]^2)       # zero-mean convention
+sig2[t] = ewma_lambda * sig2[t-1] + (1 - ewma_lambda) * u[t]^2
+ann_vol[t] = sqrt(252 * sig2[t])
+scale[t] = min(portfolio_vol_target / ann_vol[t], leverage_cap)
+           (leverage_cap if ann_vol[t] == 0)
+```
+
+The positions traded are `scale[t] * Pm[t, a]` and `scale[t] * Pc[t, a]`.
+`scale[t]` reads `u[..t]` only and multiplies the day-t decision, so it earns
+`r[t+1]`: no lookahead (tested by changing every input after a day and
+requiring the book through that day to stay identical). The cost of `u[t]` is
+known at the close of day t. There is no floor: the scale may go below 1. If
+the sample is too short the scale is all ones.
+
+**Order (pinned)**: the scale comes first and the gate second, and the scale
+is always the one computed from the unfiltered book:
+
+```
+P_unfiltered[t] = scale[t] * P[t]
+P_filtered[t]   = gate[t] * scale[t] * P[t]
+```
+
+A scale measured on the gated book would see the lower realised vol and lever
+it back up, undoing the gate. With one shared scale a gate of 0.5 is half the
+risk of the unfiltered book. Every gate in `regime.evaluation` multiplies the
+same scaled book, and the scale stays fixed at the config cost during a cost
+sweep, so the backtest is still linear in cost.
+
+The scale changes every day, so every leg now pays turnover daily: the
+unfiltered carry book trades about 34 times its notional per year where the
+unscaled book traded only at basket changes.
+
+`portfolio_scale(net, target, ewma_lambda, leverage_cap, first_day)` is public
+in every language and `scaled_book(dataset, config)` builds the book. Errors
+(1.9 type family): non-finite `net`, `target <= 0`, `ewma_lambda` outside
+`(0, 1)`, `leverage_cap <= 0`, `first_day < 0`. The pipeline result exposes the
+series (`portfolio_scale`; Java `portfolioScale()`).
 
 ---
 
 ## 4. Bundled data (`data/`)
 
-Generated by `data/generate_data.py` (numpy `default_rng(83)`, T = 2000
+Generated by `data/generate_data.py` (numpy `default_rng(19)`, T = 2000
 business days from 2015-01-02) from a true 3-state chain
 (0 = calm-bull, 1 = choppy, 2 = crisis; see the generator for the exact
-DGP constants). Files, all with a leading `date` column (YYYY-MM-DD),
+DGP constants).
+
+**Seed rule (pinned)**, fixed before any backtest of the candidate was seen:
+among seeds 1..100 of the base generator, with the scale of 3.5 on, take the
+seed whose post-warm-up (`t >= 504`) unfiltered combined Sharpe at 5 bps is
+closest to the median across those 100 seeds; ties go to the lower seed. No
+gate result enters the choice. The median is 0.5330 and the rule gives seed 19
+(`python data/generate_data.py --select-seed`). T, the regime parameters and
+every other generator constant are as tuned earlier on seed 83. The rule makes
+no promise about any other number: on this path the crisis state's sampled
+index mean and momentum return are both positive.
+
+Files, all with a leading `date` column (YYYY-MM-DD),
 floats printed with `%.10f`:
 
 | file | columns |
@@ -478,7 +549,7 @@ floats printed with `%.10f`:
 | `config.json` | all pinned parameters (keys as quoted in this spec) |
 
 `config.json` keys: `n_states`, `em_tol`, `em_max_iter`, `var_floor`,
-`momentum_lookback`, `vol_target`, `ewma_lambda`, `leverage_cap`,
+`momentum_lookback`, `vol_target`, `portfolio_vol_target`, `ewma_lambda`, `leverage_cap`,
 `carry_top_n`, `carry_bottom_n`, `rebalance_days`, `train_min_days`,
 `refit_days`, `gate_mode`, `gate_threshold`, `cost_bps`, `trading_days`.
 Optional keys `gate_band`, `transition_floor` and `calm_guard` must be finite numbers
@@ -488,11 +559,9 @@ loader; `trading_days` is informational — the annualization constant 252
 is compiled into every port). `true_states.csv` labels must be integers
 in `[0, 2]` (checked at load).
 
-On the bundled data the six rate differentials **never change rank
-order** (OU noise 0.0004 against base gaps >= 1.5 %), so the carry basket
-built on day 0 is held for all 2000 days: `turnover_carry` is exactly
-`2 / 2000`. The rebalance/ranking machinery is therefore pinned by the
-synthetic `carry_rerank_*` cases below, not by the bundled panel.
+On the bundled data the six rate differentials change rank order on 36 days,
+and the carry basket changes on only 2 days. The rebalance/ranking machinery
+is therefore pinned directly by the synthetic `carry_rerank_*` cases below.
 
 **Viterbi-vs-true mapping (pinned, teaching only)**: true labels map to
 fitted labels via volatility — calm-bull -> `argmin_k variances[k,0]`,
@@ -529,15 +598,16 @@ suite loads this file and asserts each `expect` key within `tol`
 | `carry_unfiltered` | same seven metrics | 1e-8 |
 | `carry_filtered` | same seven metrics | 1e-8 |
 | `combined_sharpe` | `sharpe_unfiltered`, `sharpe_filtered`, `max_dd_unfiltered`, `max_dd_filtered` | 1e-8 |
-| `crisis_momentum_return` | `ann_return` (must be **negative**) | 1e-8 |
+| `crisis_momentum_return` | `ann_return` of unfiltered momentum in `crisis_label` (2.2) | 1e-8 |
 | `turnover_momentum` | `mean_turnover` (mean daily, unfiltered) | 1e-8 |
 | `turnover_carry` | `mean_turnover` (mean daily, unfiltered) | 1e-8 |
+| `portfolio_scale` | `mean_scale`, `max_scale`, `scale_t504`, `scale_t1500` (3.5) | 1e-8 |
 | `carry_rerank_positions` | `mean_turnover`, `turnover_day21`, `turnover_day42`, `pos_day{15,21,42}_asset{0,3}` | 0 (exact) |
 | `carry_rerank_backtest` | `ann_return`, `sharpe`, `max_dd` | 1e-8 |
 | `gate_band_0p3` | `mean_turnover_momentum`, `mean_turnover_carry` (mean daily, filtered), `sharpe_combined` (full sample, filtered) | 1e-8 |
 | `calm_guard_injected` | `mean_gate` (from `t0` on), `trip_count`, `first_trip_day` (-1 if none) | 1e-6 |
 
-22 cases, 83 scalars; every language's golden test compares all 83.
+23 cases, 87 scalars; every language's golden test compares all 87.
 
 **`calm_guard_injected`**: `inputs = {calm_guard: 0.01, inject_t: 1000,
 inject_return: -0.3}`. Every port replaces `r[inject_t]` in the index
@@ -549,7 +619,7 @@ because the value rests on full EM fits.
 `apply_gate_band` to the pipeline gate and reruns the filtered backtests
 (`gate_band_values`). The case pins the mechanism; 0.3 is a tuned value and
 not a recommended setting. The closest any bundled `|g[t] - o[t-1]|` comes
-to the band is 6.9e-4, so rounding cannot flip a band decision across ports.
+to the band is 1.2e-4, so rounding cannot flip a band decision across ports.
 
 **`carry_rerank_*` (synthetic panel in `inputs`)**: the only two cases
 that build their own data. `inputs = {n_days: 63, n_assets: 4,
@@ -565,8 +635,7 @@ and the all-tied row at day 42 exercises the index tie-break
 (`pos_day42_asset0 = +1`). Hand-derivable: gross accrual
 `20 * 0.03 / 252`, costs `10 * 5e-4`, `ann_return = 252 * net / 63`.
 
-Semantic invariants baked into the golden set (tested): crisis momentum
-return < 0; `sharpe_filtered > sharpe_unfiltered` and
+Semantic invariants baked into the golden set (tested):
 `max_dd_filtered > max_dd_unfiltered` for the combined portfolio;
 filtered momentum has a smaller (less negative) max_dd but a lower
 ann_return than unfiltered; `pi0+pi1+pi2 = 1`;

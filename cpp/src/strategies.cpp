@@ -301,6 +301,32 @@ RegimeGateResult regime_gate(const std::vector<double>& index_returns, int n_sta
     return out;
 }
 
+std::vector<double> portfolio_scale(const std::vector<double>& net, double target,
+                                    double ewma_lambda, double leverage_cap, int first_day) {
+    for (double x : net)
+        if (!std::isfinite(x)) throw std::invalid_argument("portfolio_scale: net must be finite");
+    if (!(std::isfinite(target) && target > 0.0))
+        throw std::invalid_argument("portfolio_vol_target must be > 0");
+    if (!(ewma_lambda > 0.0 && ewma_lambda < 1.0))
+        throw std::invalid_argument("ewma lambda must be in (0, 1)");
+    if (!(std::isfinite(leverage_cap) && leverage_cap > 0.0))
+        throw std::invalid_argument("leverage_cap must be > 0");
+    if (first_day < 0) throw std::invalid_argument("first_day must be >= 0");
+    std::vector<double> scale(net.size(), 1.0);
+    const std::size_t first = static_cast<std::size_t>(first_day);
+    const std::size_t seed_day = first + static_cast<std::size_t>(kPortfolioVolInitDays) - 1;
+    if (seed_day >= net.size()) return scale;
+    double sig2 = 0.0;
+    for (std::size_t t = first; t <= seed_day; ++t) sig2 += net[t] * net[t];
+    sig2 /= static_cast<double>(kPortfolioVolInitDays);
+    for (std::size_t t = seed_day; t < net.size(); ++t) {
+        if (t > seed_day) sig2 = ewma_lambda * sig2 + (1.0 - ewma_lambda) * net[t] * net[t];
+        const double ann_vol = std::sqrt(252.0 * sig2);
+        scale[t] = ann_vol > 0.0 ? std::min(target / ann_vol, leverage_cap) : leverage_cap;
+    }
+    return scale;
+}
+
 Matrix apply_gate(const Matrix& positions, const std::vector<double>& gate) {
     validate_matrix(positions, "positions");
     if (gate.size() != positions.rows)

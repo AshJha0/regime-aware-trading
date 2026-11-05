@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. Versions follow
 
 ## Unreleased
 
+- **2.0.0, golden change.** Added a pinned portfolio vol target (`portfolio_vol_target = 0.10`, API_SPEC 3.5): one causal scale for the combined book, computed from the unfiltered book and shared by every gate. Added `portfolio_scale` and `scaled_book` in all four languages. The book now runs near 10 % instead of about 4 %, and pays turnover daily.
+- **2.0.0, golden change.** The bundled data is now seed 19, chosen by a rule fixed in advance (API_SPEC 4): the seed closest to the median unfiltered post-warm-up Sharpe of seeds 1 to 100, median 0.5330. On this seed crisis momentum is positive, so the generator assertion and the sign-case claims are gone, and the highest-variance state is not state 0, so `crisis_momentum_return` now reads the highest-variance state. Goldens are now 23 cases / 87 scalars.
 - Replaced the README headline with post-warm-up evidence; added `regime.evaluation`, `tools/evaluate_gate.py` and `docs/GATE_EVALUATION.md`.
 - Added opt-in `gate_band` and `transition_floor`, `RegimeFilter` and filter benchmarks in all four languages; `regime_gate` now rejects returns <= -100 %.
 - Added CI for all four languages, `pyproject.toml`; goldens are now 21 cases / 80 scalars.

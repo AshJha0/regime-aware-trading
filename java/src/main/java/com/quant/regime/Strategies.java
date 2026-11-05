@@ -261,6 +261,64 @@ public final class Strategies {
     /** Clip half-width of the calm-state guard in 1.4826 * MAD units (API_SPEC 3.3). */
     public static final double CALM_CLIP_MADS = 8.0;
 
+    /** Returns seeding the portfolio vol estimate. Pinned, API_SPEC 3.5. */
+    public static final int PORTFOLIO_VOL_INIT_DAYS = 21;
+
+    /**
+     * Portfolio-level vol scale of a book (API_SPEC 3.5). The scale is 1 until
+     * {@link #PORTFOLIO_VOL_INIT_DAYS} returns from {@code firstDay} on are in,
+     * then {@code min(target / annVol, leverageCap)} on a zero-mean EWMA variance
+     * seeded by their mean square ({@code leverageCap} if {@code annVol == 0}).
+     * {@code scale[t]} reads {@code net[..t]} only. All ones if the sample is too short.
+     *
+     * @param net realised net returns of the unscaled, ungated book
+     * @param target annualized portfolio vol target
+     * @param ewmaLambda EWMA decay
+     * @param leverageCap largest scale
+     * @param firstDay first day the whole book earns a return
+     * @return the scale per day
+     * @throws IllegalArgumentException on non-finite net or a bad setting
+     */
+    public static double[] portfolioScale(double[] net, double target, double ewmaLambda,
+            double leverageCap, int firstDay) {
+        for (double x : net) {
+            if (!Double.isFinite(x)) {
+                throw new IllegalArgumentException("portfolioScale: net must be finite");
+            }
+        }
+        if (!(Double.isFinite(target) && target > 0.0)) {
+            throw new IllegalArgumentException("portfolio_vol_target must be > 0, got " + target);
+        }
+        if (!(ewmaLambda > 0.0 && ewmaLambda < 1.0)) {
+            throw new IllegalArgumentException("ewma lambda must be in (0, 1), got " + ewmaLambda);
+        }
+        if (!(Double.isFinite(leverageCap) && leverageCap > 0.0)) {
+            throw new IllegalArgumentException("leverage_cap must be > 0, got " + leverageCap);
+        }
+        if (firstDay < 0) {
+            throw new IllegalArgumentException("firstDay must be >= 0, got " + firstDay);
+        }
+        double[] scale = new double[net.length];
+        Arrays.fill(scale, 1.0);
+        int seedDay = firstDay + PORTFOLIO_VOL_INIT_DAYS - 1;
+        if (seedDay >= net.length) {
+            return scale;
+        }
+        double sig2 = 0.0;
+        for (int t = firstDay; t <= seedDay; t++) {
+            sig2 += net[t] * net[t];
+        }
+        sig2 /= PORTFOLIO_VOL_INIT_DAYS;
+        for (int t = seedDay; t < net.length; t++) {
+            if (t > seedDay) {
+                sig2 = ewmaLambda * sig2 + (1.0 - ewmaLambda) * net[t] * net[t];
+            }
+            double annVol = Math.sqrt(TRADING_DAYS * sig2);
+            scale[t] = annVol > 0.0 ? Math.min(target / annVol, leverageCap) : leverageCap;
+        }
+        return scale;
+    }
+
     private static double medianOf(double[] values) {
         double[] v = values.clone();
         Arrays.sort(v);

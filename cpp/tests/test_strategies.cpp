@@ -3,9 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 #include "regime/strategies.hpp"
@@ -374,4 +376,36 @@ TEST(CalmGuard, RangeIsChecked) {
     for (double bad : {-0.1, 1.0})
         EXPECT_THROW(regime::regime_gate(r, 3, 504, 63, "prob", 0.5, 1e-8, 500, 1e-8, 0.0, 0.0, bad),
                      std::invalid_argument);
+}
+
+TEST(PortfolioScale, FormulaWarmUpAndCap) {
+    std::vector<double> net(60);
+    for (std::size_t t = 0; t < net.size(); ++t) net[t] = 0.002 + 0.0005 * static_cast<double>(t % 3);
+    const auto scale = regime::portfolio_scale(net, 0.10, 0.94, 4.0, 5);
+    const std::size_t seed_day = 5 + regime::kPortfolioVolInitDays - 1;
+    for (std::size_t t = 0; t < seed_day; ++t) EXPECT_EQ(scale[t], 1.0);
+    double sig2 = 0.0;
+    for (std::size_t t = 5; t <= seed_day; ++t) sig2 += net[t] * net[t];
+    sig2 /= 21.0;
+    EXPECT_NEAR(scale[seed_day], std::min(0.10 / std::sqrt(252.0 * sig2), 4.0), 1e-12);
+    sig2 = 0.94 * sig2 + 0.06 * net[seed_day + 1] * net[seed_day + 1];
+    EXPECT_NEAR(scale[seed_day + 1], std::min(0.10 / std::sqrt(252.0 * sig2), 4.0), 1e-12);
+    EXPECT_EQ(regime::portfolio_scale(std::vector<double>(40, 0.0), 0.10, 0.94, 4.0, 0)[39], 4.0);
+    const std::vector<double> short_net(net.begin(), net.begin() + 10);
+    for (double s : regime::portfolio_scale(short_net, 0.10, 0.94, 4.0, 5)) EXPECT_EQ(s, 1.0);
+    EXPECT_THROW(regime::portfolio_scale(net, 0.0, 0.94, 4.0, 5), std::invalid_argument);
+    EXPECT_THROW(regime::portfolio_scale(net, 0.10, 1.0, 4.0, 5), std::invalid_argument);
+    EXPECT_THROW(regime::portfolio_scale(net, 0.10, 0.94, 0.0, 5), std::invalid_argument);
+}
+
+TEST(PortfolioScale, IgnoresTheFuture) {
+    std::vector<double> net(200);
+    for (std::size_t t = 0; t < net.size(); ++t)
+        net[t] = 0.003 * (static_cast<double>(t * 7 % 11) - 5.0) / 5.0;
+    const auto base = regime::portfolio_scale(net, 0.10, 0.94, 4.0, 20);
+    std::vector<double> changed = net;
+    for (std::size_t t = 101; t < changed.size(); ++t) changed[t] = -3.0 * changed[t] + 0.01;
+    const auto other = regime::portfolio_scale(changed, 0.10, 0.94, 4.0, 20);
+    for (std::size_t t = 0; t <= 100; ++t) EXPECT_EQ(base[t], other[t]);
+    EXPECT_NE(base[101], other[101]);
 }
