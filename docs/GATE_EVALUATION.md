@@ -8,6 +8,8 @@ Over the full 2000 days at 5 bps the combined Sharpe is 1.80 unfiltered and 1.87
 
 Holding a constant 0.597 of the book gives Sharpe 1.49, return 3.72% and max drawdown -3.15%, against 1.35, 3.30% and -3.41% for the gate. That level is the gate's own mean, known only in hindsight, so it is a control and not a rule you could have traded.
 
+Seed 83 is one path, and a light one: 7 crisis episodes in the window against a median of 14 across seeds. Over 100 base-DGP seeds the gate beats the unfiltered book on 71% [61%, 79%] of paths, mean dSharpe +0.218, and beats the trailing vol ratio on 50% [40%, 60%], mean dSharpe -0.055. Read the bundled result and the sweep together: the bundled path alone does not settle whether the gate helps.
+
 ## Caveats
 
 - All data is synthetic. The DGP has regimes by construction and its constants were tuned on seed 83, so nothing here says the gate works on real markets.
